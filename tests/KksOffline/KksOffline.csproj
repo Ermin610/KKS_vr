@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <DefineConstants>KKS</DefineConstants>
+    <CameraSyncRepo Condition="'$(CameraSyncRepo)' == ''">$(MSBuildThisFileDirectory)..\..\CameraSync</CameraSyncRepo>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\..\KKSCharaStudioVRPlugin\SteamVR_Controller.cs" Link="Production\SteamVR_Controller.cs" />
+    <Compile Include="$(CameraSyncRepo)\KksTimelineCompatibility.cs" Link="Production\KksTimelineCompatibility.cs" />
+  </ItemGroup>
+</Project>

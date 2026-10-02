@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net462</TargetFramework>
+    <LangVersion>11</LangVersion>
+    <AssemblyName>KKSCharaStudioVRPlugin</AssemblyName>
+    <RootNamespace>KKCharaStudioVR</RootNamespace>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefineConstants>$(DefineConstants);KKS</DefineConstants>
+    <KKSGameDir Condition="'$(KKSGameDir)' == ''">$(KKS_GAME_DIR)</KKSGameDir>
+    <ManagedDir>$(KKSGameDir)\CharaStudio_Data\Managed</ManagedDir>
+    <VRDir>$(KKSGameDir)\BepInEx\plugins\KKS_VR</VRDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\KKCharaStudioVRPlugin\**\*.cs"
+      Exclude="..\KKCharaStudioVRPlugin\obj\**;..\KKCharaStudioVRPlugin\bin\**;..\KKCharaStudioVRPlugin\KKCharaStudioVR\VRLoader.cs" />
+    <Reference Include="$(ManagedDir)\UnityEngine*.dll;$(ManagedDir)\Assembly-CSharp*.dll;$(ManagedDir)\UniRx.dll;$(ManagedDir)\UniTask.dll;$(ManagedDir)\Sirenix.Serialization.dll">
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="$(KKSGameDir)\BepInEx\core\BepInEx.dll;$(KKSGameDir)\BepInEx\core\0Harmony.dll;$(VRDir)\VRGIN_OpenXR.dll;$(VRDir)\WindowsInput.dll;$(VRDir)\Unity*.dll;$(VRDir)\Valve.Newtonsoft.Json.dll">
+      <Private>false</Private>
+    </Reference>
+    <EmbeddedResource Include="..\KKCharaStudioVRPlugin\KKCharaStudioVR.Resource.resources" LogicalName="KKCharaStudioVR.Resource.resources" />
+    <EmbeddedResource Include="Resources\ColorZOrderShader" LogicalName="KKS.ColorZOrderShader" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+  <Target Name="ValidateKKSReferences" BeforeTargets="ResolveReferences">
+    <Error Condition="!Exists('$(VRDir)\VRGIN_OpenXR.dll')" Text="KKSGameDir must contain the KKS VR installation (VRGIN_OpenXR.dll)." />
+  </Target>
+</Project>

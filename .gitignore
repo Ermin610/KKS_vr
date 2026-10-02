@@ -1,0 +1,17 @@
+**/bin/
+**/obj/
+/output/
+.vs/
+.idea/
+*.user
+*.suo
+*.log
+*.dll
+*.exe
+*.pdb
+*.addon64
+*.zip
+.env
+.env.*
+!.env.example
+Directory.Build.props.user

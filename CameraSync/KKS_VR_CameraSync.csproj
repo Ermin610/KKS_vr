@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net462</TargetFramework>
+    <AssemblyName>KKS_VR_CameraSync</AssemblyName>
+    <LangVersion>7.3</LangVersion>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <DefineConstants>$(DefineConstants);KKS</DefineConstants>
+    <KKSGameDir Condition="'$(KKSGameDir)' == ''">$(KKS_GAME_DIR)</KKSGameDir>
+    <GameRoot Condition="'$(GameRoot)' == ''">$(KKSGameDir)</GameRoot>
+    <OutputPath>bin\KKS\</OutputPath>
+    <DefaultItemExcludes>$(DefaultItemExcludes);obj\**;bin\**</DefaultItemExcludes>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="$(GameRoot)\CharaStudio_Data\Managed\UnityEngine*.dll;$(GameRoot)\CharaStudio_Data\Managed\Assembly-CSharp.dll;$(GameRoot)\BepInEx\core\BepInEx.dll;$(GameRoot)\BepInEx\core\0Harmony.dll;$(GameRoot)\BepInEx\plugins\KKS_VR\VRGIN_OpenXR.dll">
+      <Private>false</Private>
+    </Reference>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+  <Target Name="ValidateKKSReferences" BeforeTargets="ResolveReferences">
+    <Error Condition="!Exists('$(GameRoot)\BepInEx\plugins\KKS_VR\VRGIN_OpenXR.dll')" Text="Set KKSGameDir or KKS_GAME_DIR to your KKS installation with VRGIN_OpenXR.dll." />
+  </Target>
+</Project>
