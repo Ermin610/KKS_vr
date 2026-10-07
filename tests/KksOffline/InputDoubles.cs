@@ -2,9 +2,9 @@ using UnityEngine;
 
 namespace Valve.VR
 {
-    public enum EVRButtonId { k_EButton_System, k_EButton_ApplicationMenu, k_EButton_Grip, k_EButton_A = 7, k_EButton_Axis0 = 32, k_EButton_Axis1, k_EButton_Axis2, k_EButton_Axis3, k_EButton_Axis4 }
+    public enum EVRButtonId { k_EButton_System, k_EButton_ApplicationMenu, k_EButton_Grip, k_EButton_A = 7, k_EButton_Axis0 = 32, k_EButton_Axis1, k_EButton_Axis2, k_EButton_Axis3, k_EButton_Axis4, k_EButton_SteamVR_Touchpad = 32, k_EButton_SteamVR_Trigger = 33 }
     public enum ETrackingResult { Uninitialized, Running_OK, Running_OutOfRange, Calibrating_InProgress, Calibrating_OutOfRange }
-    public enum SteamVR_Input_Sources { LeftHand, RightHand }
+    public enum SteamVR_Input_Sources { Any, LeftHand, RightHand }
     public sealed class BooleanAction { public bool state, stateDown, stateUp; }
     public sealed class PoseSource { public bool deviceIsConnected = true; public ETrackingResult trackingState = ETrackingResult.Running_OK; }
     public sealed class PoseAction
@@ -34,9 +34,15 @@ namespace Valve.VR
         public HapticAction this[SteamVR_Input_Sources source] { get { lastSource = source; return this; } }
         public void Execute(float delay, float seconds, float frequency, float amplitude) { calls++; duration = seconds; }
     }
+    public sealed class Vector2Action
+    {
+        public Vector2 axis;
+        public Vector2Action this[SteamVR_Input_Sources source] => this;
+    }
     public sealed class LegacyActions
     {
         public AxisAction Axis1_1D = new(), Grip_1D = new();
+        public Vector2Action Axis0_2D = new();
         public HapticAction Huptic = new();
     }
     public static class SteamVR_Actions { public static LegacyActions legacy_emulate = new(); }

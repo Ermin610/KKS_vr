@@ -1,9 +1,9 @@
 using System;
-using System.Collections.Generic;
 using UnityEngine;
 using Object = UnityEngine.Object;
 using VRUtil;
 using VRGIN.Core;
+using VRGIN.Visuals;
 
 namespace KKCharaStudioVR;
 
@@ -12,15 +12,21 @@ public class KKCharaStudioVRGUI : MonoBehaviour
 	private int windowID = 8731;
 	private Rect windowRect = new Rect((float)(Screen.width - 250), (float)(Screen.height - 400), 250f, 10f);
 	private string windowTitle = "KKCharaStudioVR Settings";
-	private Dictionary<string, GUIStyle> styleBackup = new Dictionary<string, GUIStyle>();
 
 	private bool _desktopCoverEnabled = true;
 	private Camera _coverCamera;
+	private GUIStyle _buttonStyle;
+	private GUIStyle _labelStyle;
+	private GUIStyle _toggleStyle;
+	private GUIStyle _headerStyle;
+	private GUISkin _styledSkin;
+	private bool _settingsGuiVisible;
 
 	private void Start()
 	{
-		// Test: default ON to isolate if desktop cover causes VR black screen
-		SetDesktopCover(true);
+		// A black cover camera in front of the game view also blacks the floating
+		// studio panel when that view is what the GUI quad samples.
+		SetDesktopCover(false);
 	}
 
 	private void Update()
@@ -67,7 +73,9 @@ public class KKCharaStudioVRGUI : MonoBehaviour
 
 	private void CreateCoverCamera()
 	{
-		GameObject camObj = new GameObject("VRDesktopCoverCamera");
+		// The name contains VRGIN so GameInterpreter.JudgeCamera ignores it.
+		// Otherwise this black full-screen camera is adopted as a VR slave.
+		GameObject camObj = new GameObject("VRGIN_DesktopCoverCamera");
 		GameObject.DontDestroyOnLoad(camObj);
 
 		_coverCamera = camObj.AddComponent<Camera>();
@@ -79,24 +87,82 @@ public class KKCharaStudioVRGUI : MonoBehaviour
 		_coverCamera.allowMSAA = false;
 		_coverCamera.useOcclusionCulling = false;
 		_coverCamera.stereoTargetEye = StereoTargetEyeMask.None; // Desktop only, never render to VR eyes
+		_coverCamera.eventMask = 0;
+		_coverCamera.depthTextureMode = DepthTextureMode.None;
 		_coverCamera.enabled = false;
 	}
 
 	private void OnGUI()
 	{
-		if (VRIMGUIUtil.VRGUISkin != null)
+		// The settings panel is sampled from the IMGUI texture on the GUI quad.
+		// While every quad is hidden, layout of this window is pure overhead.
+		bool visible = false;
+		foreach (GUIQuad quad in GUIQuadRegistry.Quads)
 		{
-			GUI.skin = VRIMGUIUtil.VRGUISkin;
+			if (quad != null && ((Component)quad).gameObject.activeInHierarchy)
+			{
+				visible = true;
+				break;
+			}
 		}
-		windowRect = GUI.Window(windowID, windowRect, FuncWindowGUI, windowTitle);
+		if (visible != _settingsGuiVisible)
+		{
+			_settingsGuiVisible = visible;
+			VRLog.Info(visible
+				? "Settings IMGUI resumed"
+				: "Settings IMGUI paused while GUI quads are hidden");
+		}
+		if (!visible)
+			return;
+
+		if (VRIMGUIUtil.VRGUISkin != null)
+			GUI.skin = VRIMGUIUtil.VRGUISkin;
+		EnsureStyles();
+		windowRect = GUI.Window(windowID, windowRect, FuncWindowGUI, windowTitle, GUIUtils.GetWindowStyle());
+	}
+
+	private void EnsureStyles()
+	{
+		if (GUI.skin == null || (_styledSkin == GUI.skin && _labelStyle != null))
+			return;
+		_styledSkin = GUI.skin;
+		_buttonStyle = new GUIStyle(GUI.skin.button);
+		_buttonStyle.normal.textColor = Color.white;
+		_buttonStyle.alignment = TextAnchor.MiddleCenter;
+		_labelStyle = new GUIStyle(GUI.skin.label);
+		_labelStyle.normal.textColor = Color.white;
+		_labelStyle.alignment = TextAnchor.MiddleLeft;
+		_labelStyle.wordWrap = false;
+		_toggleStyle = new GUIStyle(GUI.skin.toggle);
+		_toggleStyle.normal.textColor = Color.white;
+		_toggleStyle.onNormal.textColor = Color.white;
+		_headerStyle = new GUIStyle(_labelStyle);
+		_headerStyle.fontStyle = FontStyle.Bold;
+		_headerStyle.alignment = TextAnchor.MiddleCenter;
+	}
+
+	private void Label(string text)
+	{
+		GUILayout.Label(text, _labelStyle);
+	}
+
+	private void Header(string text)
+	{
+		GUILayout.Label(text, _headerStyle);
+	}
+
+	private bool Button(string text)
+	{
+		return GUILayout.Button(text, _buttonStyle);
+	}
+
+	private bool Toggle(bool value, string text)
+	{
+		return GUILayout.Toggle(value, text, _toggleStyle);
 	}
 
 	private void FuncWindowGUI(int winID)
 	{
-		styleBackup = new Dictionary<string, GUIStyle>();
-		BackupGUIStyle("Button");
-		BackupGUIStyle("Label");
-		BackupGUIStyle("Toggle");
 		try
 		{
 			if ((int)Event.current.type == 0)
@@ -105,44 +171,31 @@ public class KKCharaStudioVRGUI : MonoBehaviour
 				GUI.FocusWindow(winID);
 			}
 			GUI.enabled = true;
-			GUIStyle style = GUI.skin.GetStyle("Button");
-			style.normal.textColor = Color.white;
-			style.alignment = (TextAnchor)4;
-			GUIStyle style2 = GUI.skin.GetStyle("Label");
-			style2.normal.textColor = Color.white;
-			style2.alignment = (TextAnchor)3;
-			style2.wordWrap = false;
-			GUIStyle style3 = GUI.skin.GetStyle("Toggle");
-			style3.normal.textColor = Color.white;
-			style3.onNormal.textColor = Color.white;
+			EnsureStyles();
 
-			GUILayout.BeginVertical(new GUILayoutOption[0]);
-
-			GUIStyle headerStyle = new GUIStyle(style2);
-			headerStyle.fontStyle = FontStyle.Bold;
-			headerStyle.alignment = TextAnchor.MiddleCenter;
+			GUILayout.BeginVertical();
 
 			KKCharaStudioVRSettings settings = VR.Manager.Context.Settings as KKCharaStudioVRSettings;
 			if (settings != null)
 			{
-				GUILayout.Label("--- 移动设置 ---", headerStyle);
-				GUILayout.Label($"Locomotion Speed: {settings.LocomotionSpeed:F1}");
+				Header("--- 移动设置 ---");
+				Label($"Locomotion Speed: {settings.LocomotionSpeed:F1}");
 				settings.LocomotionSpeed = GUILayout.HorizontalSlider(settings.LocomotionSpeed, 0.5f, 10f);
 
-				GUILayout.Label($"Snap Turn Angle: {settings.SnapTurnAngle:F0}");
+				Label($"Snap Turn Angle: {settings.SnapTurnAngle:F0}");
 				settings.SnapTurnAngle = GUILayout.HorizontalSlider(settings.SnapTurnAngle, 15f, 180f);
 
-				settings.SmoothTurnEnabled = GUILayout.Toggle(settings.SmoothTurnEnabled, "Smooth Turn Enabled");
+				settings.SmoothTurnEnabled = Toggle(settings.SmoothTurnEnabled, "Smooth Turn Enabled");
 
 				if (settings.SmoothTurnEnabled)
 				{
-					GUILayout.Label($"Smooth Turn Speed: {settings.SmoothTurnSpeed:F0}");
+					Label($"Smooth Turn Speed: {settings.SmoothTurnSpeed:F0}");
 					settings.SmoothTurnSpeed = GUILayout.HorizontalSlider(settings.SmoothTurnSpeed, 30f, 180f);
 				}
 
 				GUILayout.Space(5);
-				GUILayout.Label("--- UI 设置 ---", headerStyle);
-				if (GUILayout.Button("Reset Camera Position"))
+				Header("--- UI 设置 ---");
+				if (Button("Reset Camera Position"))
 				{
 					if (VRCameraMoveHelper.Instance != null)
 					{
@@ -150,7 +203,7 @@ public class KKCharaStudioVRGUI : MonoBehaviour
 					}
 				}
 
-				if (GUILayout.Button("Hide/Show All UI"))
+				if (Button("Hide/Show All UI"))
 				{
 					VRQuickActions actions = ((Component)this).gameObject.GetComponent<VRQuickActions>();
 					if (actions != null)
@@ -159,17 +212,17 @@ public class KKCharaStudioVRGUI : MonoBehaviour
 					}
 				}
 
-				GUILayout.Label($"UI Spawn Distance: {settings.UISpawnDistance:F2}m");
+				Label($"UI Spawn Distance: {settings.UISpawnDistance:F2}m");
 				settings.UISpawnDistance = GUILayout.HorizontalSlider(
 					settings.UISpawnDistance,
 					VRCameraMoveHelper.MinMainUIDistance,
 					VRCameraMoveHelper.MaxMainUIDistance);
-				GUILayout.Label($"Main UI Scale: {settings.UISpawnScale:F1}x");
+				Label($"Main UI Scale: {settings.UISpawnScale:F1}x");
 				settings.UISpawnScale = GUILayout.HorizontalSlider(
 					settings.UISpawnScale,
 					VRCameraMoveHelper.MinMainUIScale,
 					VRCameraMoveHelper.MaxMainUIScale);
-				if (GUILayout.Button("Apply / Recall Main Studio GUI"))
+				if (Button("Apply / Recall Main Studio GUI"))
 				{
 					VRQuickActions actions = ((Component)this).gameObject.GetComponent<VRQuickActions>();
 					if (actions != null)
@@ -178,7 +231,7 @@ public class KKCharaStudioVRGUI : MonoBehaviour
 						VRCameraMoveHelper.RepositionMainUI(settings.UISpawnDistance, settings.UISpawnScale);
 				}
 
-				GUILayout.Label("Face Buttons (Wrist Menu / GUI Toggle)");
+				Label("Face Buttons (Wrist Menu / GUI Toggle)");
 				int controllerLayout = settings.ControllerFaceButtonLayout == KKCharaStudioVRSettings.ControllerLayoutLeftHand
 					? 1
 					: settings.ControllerFaceButtonLayout == KKCharaStudioVRSettings.ControllerLayoutRightHand
@@ -187,7 +240,8 @@ public class KKCharaStudioVRGUI : MonoBehaviour
 				int nextControllerLayout = GUILayout.SelectionGrid(
 					controllerLayout,
 					new[] { "Split X/A", "Left X/Y", "Right A/B" },
-					3);
+					3,
+					_buttonStyle);
 				if (nextControllerLayout != controllerLayout)
 				{
 					settings.ControllerFaceButtonLayout = nextControllerLayout == 1
@@ -196,92 +250,92 @@ public class KKCharaStudioVRGUI : MonoBehaviour
 							? KKCharaStudioVRSettings.ControllerLayoutRightHand
 							: KKCharaStudioVRSettings.ControllerLayoutSplitHands;
 				}
-				settings.TimelineFollowCamera = GUILayout.Toggle(
+				settings.TimelineFollowCamera = Toggle(
 					settings.TimelineFollowCamera,
 					"Timeline follows camera (off = animation only)");
 
-				settings.WristMenuEnabled = GUILayout.Toggle(settings.WristMenuEnabled, "Wrist Quick Menu");
+				settings.WristMenuEnabled = Toggle(settings.WristMenuEnabled, "Wrist Quick Menu");
 				if (settings.WristMenuEnabled)
 				{
-					GUILayout.Label($"Wrist Menu Scale: {settings.WristMenuScale:F2}");
+					Label($"Wrist Menu Scale: {settings.WristMenuScale:F2}");
 					settings.WristMenuScale = GUILayout.HorizontalSlider(settings.WristMenuScale, 0.7f, 1.5f);
 				}
 
 				GUILayout.Space(5);
-				GUILayout.Label("--- 手部设置 ---", headerStyle);
-				settings.HandModelEnabled = GUILayout.Toggle(settings.HandModelEnabled, "Hand Model Enabled");
+				Header("--- 手部设置 ---");
+				settings.HandModelEnabled = Toggle(settings.HandModelEnabled, "Hand Model Enabled");
 				if (settings.HandModelEnabled)
 				{
-					GUILayout.Label($"Hand Alpha: {settings.HandModelAlpha:F2}");
+					Label($"Hand Alpha: {settings.HandModelAlpha:F2}");
 					settings.HandModelAlpha = GUILayout.HorizontalSlider(settings.HandModelAlpha, 0.05f, 1f);
-					GUILayout.Label($"Hand Scale: {settings.HandModelScale:F2}");
+					Label($"Hand Scale: {settings.HandModelScale:F2}");
 					settings.HandModelScale = GUILayout.HorizontalSlider(settings.HandModelScale, 0.5f, 2f);
 
-					GUILayout.Label($"Hand Offset X (L/R): {settings.HandOffsetX:F3}");
+					Label($"Hand Offset X (L/R): {settings.HandOffsetX:F3}");
 					settings.HandOffsetX = GUILayout.HorizontalSlider(settings.HandOffsetX, -0.2f, 0.2f);
-					GUILayout.Label($"Hand Offset Y (U/D): {settings.HandOffsetY:F3}");
+					Label($"Hand Offset Y (U/D): {settings.HandOffsetY:F3}");
 					settings.HandOffsetY = GUILayout.HorizontalSlider(settings.HandOffsetY, -0.2f, 0.2f);
-					GUILayout.Label($"Hand Offset Z (F/B): {settings.HandOffsetZ:F3}");
+					Label($"Hand Offset Z (F/B): {settings.HandOffsetZ:F3}");
 					settings.HandOffsetZ = GUILayout.HorizontalSlider(settings.HandOffsetZ, -0.2f, 0.2f);
 
-					GUILayout.Label($"Hand Rot Pitch (X): {settings.HandRotPitch:F0}");
+					Label($"Hand Rot Pitch (X): {settings.HandRotPitch:F0}");
 					settings.HandRotPitch = GUILayout.HorizontalSlider(settings.HandRotPitch, -90f, 90f);
-					GUILayout.Label($"Hand Rot Yaw (Y): {settings.HandRotYaw:F0}");
+					Label($"Hand Rot Yaw (Y): {settings.HandRotYaw:F0}");
 					settings.HandRotYaw = GUILayout.HorizontalSlider(settings.HandRotYaw, -90f, 90f);
-					GUILayout.Label($"Hand Rot Roll (Z): {settings.HandRotRoll:F0}");
+					Label($"Hand Rot Roll (Z): {settings.HandRotRoll:F0}");
 					settings.HandRotRoll = GUILayout.HorizontalSlider(settings.HandRotRoll, -90f, 90f);
 				}
 
 				GUILayout.Space(5);
-				GUILayout.Label("--- 物理设置 ---", headerStyle);
-				settings.PhysicsHandsEnabled = GUILayout.Toggle(settings.PhysicsHandsEnabled, "Physics Hands (防穿模物理手)");
-				settings.DynamicBoneCollisionEnabled = GUILayout.Toggle(settings.DynamicBoneCollisionEnabled, "DynamicBone Collision");
+				Header("--- 物理设置 ---");
+				settings.PhysicsHandsEnabled = Toggle(settings.PhysicsHandsEnabled, "Physics Hands (防穿模物理手)");
+				settings.DynamicBoneCollisionEnabled = Toggle(settings.DynamicBoneCollisionEnabled, "DynamicBone Collision");
 				if (settings.DynamicBoneCollisionEnabled)
 				{
-					GUILayout.Label($"Collider Radius: {settings.ColliderRadius:F3}");
+					Label($"Collider Radius: {settings.ColliderRadius:F3}");
 					settings.ColliderRadius = GUILayout.HorizontalSlider(settings.ColliderRadius, 0.005f, 0.1f);
 				}
 
-				settings.HapticFeedbackEnabled = GUILayout.Toggle(settings.HapticFeedbackEnabled, "Haptic Feedback");
+				settings.HapticFeedbackEnabled = Toggle(settings.HapticFeedbackEnabled, "Haptic Feedback");
 				if (settings.HapticFeedbackEnabled)
 				{
-					GUILayout.Label($"Haptic Intensity: {settings.HapticFeedbackIntensity:F2}");
+					Label($"Haptic Intensity: {settings.HapticFeedbackIntensity:F2}");
 					settings.HapticFeedbackIntensity = GUILayout.HorizontalSlider(settings.HapticFeedbackIntensity, 0.1f, 1f);
-					settings.VibrateOnlyOnBreasts = GUILayout.Toggle(settings.VibrateOnlyOnBreasts, "Only Vibrate on Breasts (仅触碰胸部时震动)");
+					settings.VibrateOnlyOnBreasts = Toggle(settings.VibrateOnlyOnBreasts, "Only Vibrate on Breasts (仅触碰胸部时震动)");
 				}
 
-				settings.ProximityGrabEnabled = GUILayout.Toggle(settings.ProximityGrabEnabled, "Proximity Grab");
+				settings.ProximityGrabEnabled = Toggle(settings.ProximityGrabEnabled, "Proximity Grab");
 				if (settings.ProximityGrabEnabled)
 				{
-					GUILayout.Label($"Grab Radius: {settings.ProximityGrabRadius:F2}m");
+					Label($"Grab Radius: {settings.ProximityGrabRadius:F2}m");
 					settings.ProximityGrabRadius = GUILayout.HorizontalSlider(settings.ProximityGrabRadius, 0.05f, 0.25f);
 				}
 
 				GUILayout.Space(5);
-				GUILayout.Label("--- 舒适设置 ---", headerStyle);
-				settings.ComfortVignetteEnabled = GUILayout.Toggle(settings.ComfortVignetteEnabled, "Movement Vignette");
+				Header("--- 舒适设置 ---");
+				settings.ComfortVignetteEnabled = Toggle(settings.ComfortVignetteEnabled, "Movement Vignette");
 				if (settings.ComfortVignetteEnabled)
 				{
-					GUILayout.Label($"Vignette Radius: {settings.ComfortVignetteRadius:F2}");
+					Label($"Vignette Radius: {settings.ComfortVignetteRadius:F2}");
 					settings.ComfortVignetteRadius = GUILayout.HorizontalSlider(settings.ComfortVignetteRadius, 0.3f, 0.8f);
 				}
 
 				GUILayout.Space(5);
-				GUILayout.Label("--- 高级设置 ---", headerStyle);
-				settings.TwoHandScaleEnabled = GUILayout.Toggle(settings.TwoHandScaleEnabled, "Two-Hand World Scale");
+				Header("--- 高级设置 ---");
+				settings.TwoHandScaleEnabled = Toggle(settings.TwoHandScaleEnabled, "Two-Hand World Scale");
 
-				if (GUILayout.Button(_desktopCoverEnabled ? "Restore Desktop View (Space)" : "Cover Desktop View (Space)"))
+				if (Button(_desktopCoverEnabled ? "Restore Desktop View (Space)" : "Cover Desktop View (Space)"))
 				{
 					SetDesktopCover(!_desktopCoverEnabled);
 				}
 
 				GUILayout.Space(10);
 				GUILayout.BeginHorizontal();
-				if (GUILayout.Button("Save Settings"))
+				if (Button("Save Settings"))
 				{
 					settings.Save();
 				}
-				if (GUILayout.Button("Reset to Default"))
+				if (Button("Reset to Default"))
 				{
 					settings.LocomotionSpeed = 2.0f;
 					settings.SnapTurnAngle = 45f;
@@ -305,8 +359,8 @@ public class KKCharaStudioVRGUI : MonoBehaviour
 					settings.VibrateOnlyOnBreasts = true;
 					settings.ProximityGrabEnabled = true;
 					settings.ProximityGrabRadius = 0.12f;
-					settings.UISpawnDistance = 2.0f;
-					settings.UISpawnScale = 1.0f;
+					settings.UISpawnDistance = KKCharaStudioVRSettings.DefaultUISpawnDistance;
+					settings.UISpawnScale = KKCharaStudioVRSettings.DefaultUISpawnScale;
 					settings.ControllerFaceButtonLayout = KKCharaStudioVRSettings.ControllerLayoutSplitHands;
 					settings.TimelineFollowCamera = true;
 					settings.ComfortVignetteEnabled = true;
@@ -319,7 +373,7 @@ public class KKCharaStudioVRGUI : MonoBehaviour
 				GUILayout.EndHorizontal();
 			}
 
-			if (GUILayout.Button("Close"))
+			if (Button("Close"))
 			{
 				VRQuickActions actions = ((Component)this).gameObject.GetComponent<VRQuickActions>();
 				if (actions != null)
@@ -334,36 +388,6 @@ public class KKCharaStudioVRGUI : MonoBehaviour
 		catch (Exception value)
 		{
 			Console.WriteLine(value);
-		}
-		finally
-		{
-			RestoreGUIStyle("Button");
-			RestoreGUIStyle("Label");
-			RestoreGUIStyle("Toggle");
-		}
-	}
-
-	private void BackupGUIStyle(string name)
-	{
-		if (GUI.skin == null) return;
-		GUIStyle style = GUI.skin.GetStyle(name);
-		if (style == null) return;
-		GUIStyle value = new GUIStyle(style);
-		styleBackup.Add(name, value);
-	}
-
-	private void RestoreGUIStyle(string name)
-	{
-		if (styleBackup.ContainsKey(name) && GUI.skin != null)
-		{
-			GUIStyle val = styleBackup[name];
-			GUIStyle style = GUI.skin.GetStyle(name);
-			if (style != null)
-			{
-				style.normal.textColor = val.normal.textColor;
-				style.alignment = val.alignment;
-				style.wordWrap = val.wordWrap;
-			}
 		}
 	}
 }

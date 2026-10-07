@@ -41,6 +41,13 @@ namespace UnityEngine
     {
         public Vector3 position;
         public Quaternion rotation = Quaternion.identity;
+        public void RotateAround(Vector3 point, Vector3 axis, float angle)
+        {
+            Quaternion rot = Quaternion.AngleAxis(angle, axis);
+            Vector3 diff = position - point;
+            position = point + rot * diff;
+            rotation = rot * rotation;
+        }
     }
     public static class Mathf
     {

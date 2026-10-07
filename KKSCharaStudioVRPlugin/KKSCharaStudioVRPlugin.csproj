@@ -7,7 +7,8 @@
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <DefineConstants>$(DefineConstants);KKS</DefineConstants>
-    <KKSGameDir Condition="'$(KKSGameDir)' == ''">$(KKS_GAME_DIR)</KKSGameDir>
+    <KKSGameDir Condition="'$(KKSGameDir)' == '' and '$(KKS_GAME_DIR)' != ''">$(KKS_GAME_DIR)</KKSGameDir>
+    <KKSGameDir Condition="'$(KKSGameDir)' == ''">E:\KKS\KoikatuSunshine</KKSGameDir>
     <ManagedDir>$(KKSGameDir)\CharaStudio_Data\Managed</ManagedDir>
     <VRDir>$(KKSGameDir)\BepInEx\plugins\KKS_VR</VRDir>
   </PropertyGroup>

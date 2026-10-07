@@ -222,16 +222,26 @@ public sealed partial class VRWristMenuController
             _timelineFovValueText.text = available ? fieldOfView.ToString("F1") + "°" : "--";
         if (_timelineFovStateText != null)
         {
-            float vertical = _settings == null ? 0f : _settings.TimelineVerticalOffset;
-            float yaw = _settings == null ? 0f : _settings.TimelineYawOffset;
-            string saved = _settings != null && _settings.TimelineSavedControlPresetAvailable
-                ? L("  已存", "  保存済", "  Saved")
-                : string.Empty;
-            _timelineFovStateText.text =
-                "FOV " + (available ? fieldOfView.ToString("F1") + "°" : "--")
-                + "  |  Y " + vertical.ToString("+0.00;-0.00;0.00") + "m"
-                + "  |  Yaw " + yaw.ToString("+0.0;-0.0;0.0") + "°"
-                + saved;
+            if (VRTimelineService.TimelineDisabled)
+            {
+                _timelineFovStateText.text = L(
+                    "Timeline 已暂时禁用  |  MMD 功能优先",
+                    "Timeline は現在無効化されています  |  MMD優先",
+                    "Timeline is currently disabled  |  MMD Priority");
+            }
+            else
+            {
+                float vertical = _settings == null ? 0f : _settings.TimelineVerticalOffset;
+                float yaw = _settings == null ? 0f : _settings.TimelineYawOffset;
+                string saved = _settings != null && _settings.TimelineSavedControlPresetAvailable
+                    ? L("  已存", "  保存済", "  Saved")
+                    : string.Empty;
+                _timelineFovStateText.text =
+                    "FOV " + (available ? fieldOfView.ToString("F1") + "°" : "--")
+                    + "  |  Y " + vertical.ToString("+0.00;-0.00;0.00") + "m"
+                    + "  |  Yaw " + yaw.ToString("+0.0;-0.0;0.0") + "°"
+                    + saved;
+            }
         }
     }
 
@@ -246,6 +256,15 @@ public sealed partial class VRWristMenuController
 
     private void HandleToggleTimelineFovOverride()
     {
+        if (VRTimelineService.TimelineDisabled)
+        {
+            SetStatus(
+                L("Timeline 功能已暂时禁用", "Timeline 機能は現在無効化されています", "Timeline feature is disabled"),
+                new Color(1f, 0.72f, 0.25f, 1f),
+                4f);
+            return;
+        }
+
         ResolveSettings();
         if (_settings == null)
         {
@@ -290,6 +309,15 @@ public sealed partial class VRWristMenuController
 
     private void HandleAdjustTimelineFov(float delta)
     {
+        if (VRTimelineService.TimelineDisabled)
+        {
+            SetStatus(
+                L("Timeline 功能已暂时禁用", "Timeline 機能は現在無効化されています", "Timeline feature is disabled"),
+                new Color(1f, 0.72f, 0.25f, 1f),
+                4f);
+            return;
+        }
+
         ResolveSettings();
         if (_settings == null)
             return;
@@ -315,6 +343,15 @@ public sealed partial class VRWristMenuController
 
     private void HandleResetTimelineFov()
     {
+        if (VRTimelineService.TimelineDisabled)
+        {
+            SetStatus(
+                L("Timeline 功能已暂时禁用", "Timeline 機能は現在無効化されています", "Timeline feature is disabled"),
+                new Color(1f, 0.72f, 0.25f, 1f),
+                4f);
+            return;
+        }
+
         ResolveSettings();
         if (_settings == null)
             return;
@@ -340,6 +377,15 @@ public sealed partial class VRWristMenuController
 
     private void HandleSaveTimelineControlPreset()
     {
+        if (VRTimelineService.TimelineDisabled)
+        {
+            SetStatus(
+                L("Timeline 功能已暂时禁用", "Timeline 機能は現在無効化されています", "Timeline feature is disabled"),
+                new Color(1f, 0.72f, 0.25f, 1f),
+                4f);
+            return;
+        }
+
         ResolveSettings();
         if (_settings == null)
             return;
@@ -361,6 +407,15 @@ public sealed partial class VRWristMenuController
 
     private void HandleLoadTimelineControlPreset()
     {
+        if (VRTimelineService.TimelineDisabled)
+        {
+            SetStatus(
+                L("Timeline 功能已暂时禁用", "Timeline 機能は現在無効化されています", "Timeline feature is disabled"),
+                new Color(1f, 0.72f, 0.25f, 1f),
+                4f);
+            return;
+        }
+
         ResolveSettings();
         if (_settings == null)
             return;

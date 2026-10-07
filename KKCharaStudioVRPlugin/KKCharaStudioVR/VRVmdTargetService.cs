@@ -65,6 +65,40 @@ internal static class VRVmdTargetService
         return keys.Count > 0 ? keys.ToArray() : GetSelectedObjectKeys();
     }
 
+    /// <summary>
+    /// The characters a motion VMD load will bind, chosen the same way as the
+    /// MMDD load script chooses its actors.
+    /// </summary>
+    public static List<OCIChar> ResolveMotionTargets(int[] requestedKeys)
+    {
+        List<OCIChar> characters = new List<OCIChar>();
+        try
+        {
+            Studio.Studio studio = Singleton<Studio.Studio>.Instance;
+            if (studio == null || studio.dicObjectCtrl == null)
+                return characters;
+
+            List<int> liveKeys = new List<int>();
+            foreach (KeyValuePair<int, ObjectCtrlInfo> pair in studio.dicObjectCtrl)
+            {
+                if (IsLiveCharacter(pair.Value as OCIChar))
+                    liveKeys.Add(pair.Key);
+            }
+
+            int[] keys = VRStudioInteractionPolicy.ResolveMmdMotionTargets(
+                requestedKeys,
+                GetSelectedObjectKeys(),
+                liveKeys.ToArray());
+            foreach (int key in keys)
+                characters.Add((OCIChar)studio.dicObjectCtrl[key]);
+        }
+        catch (Exception ex)
+        {
+            VRLog.Warn("Unable to resolve VMD motion targets: " + ex.Message);
+        }
+        return characters;
+    }
+
     public static List<VRVmdActorTarget> GetAllTargets(out string status)
     {
         List<VRVmdActorTarget> targets = new List<VRVmdActorTarget>();

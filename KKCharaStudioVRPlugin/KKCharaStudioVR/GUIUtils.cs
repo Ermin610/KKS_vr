@@ -1,5 +1,6 @@
 using System;
 using UnityEngine;
+using VRGIN.Core;
 using Object = UnityEngine.Object;
 
 namespace KKCharaStudioVR;
@@ -9,6 +10,10 @@ public class GUIUtils
 	private static bool isVR;
 
 	private static Texture2D windowBG;
+
+	private static GUIStyle cachedWindowStyle;
+
+	private static GUISkin cachedSkin;
 
 	static GUIUtils()
 	{
@@ -27,23 +32,31 @@ public class GUIUtils
 
 	public static GUIStyle GetWindowStyle()
 	{
-		//IL_000a: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0010: Expected O, but got Unknown
-		//IL_0017: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0077: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0087: Unknown result type (might be due to invalid IL or missing references)
-		GUIStyle val = new GUIStyle(GUI.skin.window);
-		if (isVR)
+		bool vr = isVR;
+		try
 		{
-			GUI.backgroundColor = Color.black;
-			val.onNormal.background = windowBG;
-			val.normal.background = windowBG;
-			val.hover.background = windowBG;
-			val.focused.background = windowBG;
-			val.active.background = windowBG;
-			val.hover.textColor = Color.blue;
-			val.onHover.textColor = Color.blue;
+			vr = vr || VR.Active;
 		}
+		catch (Exception)
+		{
+		}
+		if (!vr || GUI.skin == null)
+			return GUI.skin != null ? new GUIStyle(GUI.skin.window) : GUIStyle.none;
+
+		GUI.backgroundColor = Color.black;
+		if (cachedWindowStyle != null && cachedSkin == GUI.skin)
+			return cachedWindowStyle;
+
+		GUIStyle val = new GUIStyle(GUI.skin.window);
+		val.onNormal.background = windowBG;
+		val.normal.background = windowBG;
+		val.hover.background = windowBG;
+		val.focused.background = windowBG;
+		val.active.background = windowBG;
+		val.hover.textColor = Color.blue;
+		val.onHover.textColor = Color.blue;
+		cachedWindowStyle = val;
+		cachedSkin = GUI.skin;
 		return val;
 	}
 }

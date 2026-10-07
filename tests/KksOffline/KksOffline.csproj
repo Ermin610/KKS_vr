@@ -9,5 +9,13 @@
   <ItemGroup>
     <Compile Include="..\..\KKSCharaStudioVRPlugin\SteamVR_Controller.cs" Link="Production\SteamVR_Controller.cs" />
     <Compile Include="$(CameraSyncRepo)\KksTimelineCompatibility.cs" Link="Production\KksTimelineCompatibility.cs" />
+    <Compile Include="..\..\KKCharaStudioVRPlugin\KKCharaStudioVR\VRCardThumbnailCache.cs" Link="Production\VRCardThumbnailCache.cs" />
+    <Compile Include="..\..\KKCharaStudioVRPlugin\KKCharaStudioVR\VRMirrorObliquePolicy.cs" Link="Production\VRMirrorObliquePolicy.cs" />
+    <Compile Include="..\..\KKCharaStudioVRPlugin\KKCharaStudioVR\VRMirrorStereoPolicy.cs" Link="Production\VRMirrorStereoPolicy.cs" />
+    <Compile Include="..\..\KKCharaStudioVRPlugin\KKCharaStudioVR\VRWristFileCatalog.cs" Link="Production\VRWristFileCatalog.cs" />
+    <Compile Include="..\..\KKCharaStudioVRPlugin\KKCharaStudioVR\VRMmdDanceRatingStore.cs" Link="Production\VRMmdDanceRatingStore.cs" />
+    <Compile Include="..\..\KKCharaStudioVRPlugin\KKCharaStudioVR\VRStudioInteractionPolicy.cs" Link="Production\VRStudioInteractionPolicy.cs" />
+    <Compile Include="..\..\KKCharaStudioVRPlugin\KKCharaStudioVR\VRWristMenuHitPolicy.cs" Link="Production\VRWristMenuHitPolicy.cs" />
+    <Compile Include="..\..\KKCharaStudioVRPlugin\KKCharaStudioVR\VRFigureScalePolicy.cs" Link="Production\VRFigureScalePolicy.cs" />
   </ItemGroup>
 </Project>

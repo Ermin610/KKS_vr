@@ -5,7 +5,8 @@
     <LangVersion>7.3</LangVersion>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <DefineConstants>$(DefineConstants);KKS</DefineConstants>
-    <KKSGameDir Condition="'$(KKSGameDir)' == ''">$(KKS_GAME_DIR)</KKSGameDir>
+    <KKSGameDir Condition="'$(KKSGameDir)' == '' and '$(KKS_GAME_DIR)' != ''">$(KKS_GAME_DIR)</KKSGameDir>
+    <KKSGameDir Condition="'$(KKSGameDir)' == ''">E:\KKS\KoikatuSunshine</KKSGameDir>
     <GameRoot Condition="'$(GameRoot)' == ''">$(KKSGameDir)</GameRoot>
     <OutputPath>bin\KKS\</OutputPath>
     <DefaultItemExcludes>$(DefaultItemExcludes);obj\**;bin\**</DefaultItemExcludes>

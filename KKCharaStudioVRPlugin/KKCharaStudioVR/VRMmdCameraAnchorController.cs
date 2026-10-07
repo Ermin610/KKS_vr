@@ -8,6 +8,8 @@ namespace KKCharaStudioVR;
 /// Capture one neutral room-scale offset at playback start and restore it after
 /// MMDD has authored the frame, so leaning or stepping does not become a new
 /// camera centre while Fixed FOV changes the composition distance.
+/// Right-stick yaw, pitch, and height are reapplied from that authored pose
+/// after the correction, so the nudge cannot accumulate into the MMD camera.
 /// </summary>
 [DefaultExecutionOrder(31900)]
 internal sealed class VRMmdCameraAnchorController : MonoBehaviour
@@ -15,6 +17,7 @@ internal sealed class VRMmdCameraAnchorController : MonoBehaviour
     private const float ReporterStaleSeconds = 1f;
     private const float MaxLocalOffset = 5f;
     private const float AppliedRotationMatchDegrees = 0.05f;
+    private const float AppliedPositionMatchMeters = 0.004f;
 
     private static VRMmdCameraAnchorController _instance;
 
@@ -26,7 +29,9 @@ internal sealed class VRMmdCameraAnchorController : MonoBehaviour
     private Vector3 _preparedOriginPosition;
     private Quaternion _preparedOriginRotation = Quaternion.identity;
     private bool _presentationYawApplied;
+    private Vector3 _presentationYawBasePosition;
     private Quaternion _presentationYawBaseRotation = Quaternion.identity;
+    private Vector3 _presentationYawAppliedPosition;
     private Quaternion _presentationYawAppliedRotation = Quaternion.identity;
 
     private void Awake()
@@ -56,11 +61,16 @@ internal sealed class VRMmdCameraAnchorController : MonoBehaviour
         if (!mmddOwnsVrCamera)
         {
             ClearAnchor();
-            if (VRMmdPlaybackController.IsPresentationCameraControlActive)
-                ApplyPresentationYawToCurrentRig();
+            // Without a camera motion the rig belongs to the player's own
+            // locomotion. A trim left from a camera clip must not keep turning it.
+            RestorePresentationYawIfStillApplied();
             return;
         }
 
+        // Height and pitch move the eye. Put the rig back on the untrimmed pose
+        // before the room-scale correction reads head.position as the authored
+        // camera, then CorrectCurrentEvaluation reapplies the nudge.
+        RestorePresentationYawIfStillApplied();
         CorrectCurrentEvaluation();
     }
 
@@ -157,8 +167,18 @@ internal sealed class VRMmdCameraAnchorController : MonoBehaviour
 
     internal static void RefreshPresentationYawNow()
     {
-        if (_instance != null)
+        if (_instance == null)
+            return;
+        if (VRMmdPlaybackController.HasActiveCameraMotion)
             _instance.ApplyPresentationYawToCurrentRig();
+        else
+            _instance.RestorePresentationYawIfStillApplied();
+    }
+
+    internal static void ReleasePresentationYaw()
+    {
+        if (_instance != null)
+            _instance.RestorePresentationYawIfStillApplied();
     }
 
     private void ClearAnchor()
@@ -260,9 +280,12 @@ internal sealed class VRMmdCameraAnchorController : MonoBehaviour
         Vector3 nextOriginPosition = authoredCameraPosition - neutralWorldOffset;
         if (IsFinite(nextOriginPosition))
         {
-            origin.position = nextOriginPosition;
+            if ((origin.position - nextOriginPosition).sqrMagnitude > 1e-10f)
+                origin.position = nextOriginPosition;
             if (VRMmdPlaybackController.IsPresentationCameraControlActive)
                 ApplyPresentationYaw(origin, head);
+            else
+                RestorePresentationYawIfStillApplied();
         }
         else
             ClearAnchor();
@@ -279,46 +302,93 @@ internal sealed class VRMmdCameraAnchorController : MonoBehaviour
 
     private void ApplyPresentationYaw(Transform origin, Transform head)
     {
-        Quaternion currentRotation = origin.rotation;
-        if (!IsFinite(currentRotation))
+        if (!IsFinite(origin.position) || !IsFinite(origin.rotation) || head == null)
         {
             ClearPresentationYawTracking();
             return;
         }
 
-        Quaternion baseRotation = _presentationYawApplied
-            && Quaternion.Angle(
-                currentRotation,
-                _presentationYawAppliedRotation) <= AppliedRotationMatchDegrees
-            ? _presentationYawBaseRotation
-            : currentRotation;
-        float yawOffset = VRMmdPlaybackController.PresentationYawOffset;
-        Quaternion targetRotation =
-            Quaternion.AngleAxis(yawOffset, Vector3.up) * baseRotation;
-        if (!IsFinite(baseRotation) || !IsFinite(targetRotation))
+        bool poseMatches = PresentationPoseMatches(
+            origin.position,
+            origin.rotation,
+            _presentationYawAppliedPosition,
+            _presentationYawAppliedRotation);
+        Vector3 basePosition = poseMatches ? _presentationYawBasePosition : origin.position;
+        Quaternion baseRotation = poseMatches ? _presentationYawBaseRotation : origin.rotation;
+        if (!IsFinite(basePosition) || !IsFinite(baseRotation))
         {
             ClearPresentationYawTracking();
             return;
         }
 
-        // Rotate around the tracked head rather than the origin. This keeps the
-        // current eye position fixed and avoids the centre-point drift caused by
-        // rotating a room-scale origin around its own pivot.
+        float yaw = VRMmdPlaybackController.PresentationYawOffset;
+        float pitch = VRMmdPlaybackController.PresentationPitchOffset;
+        float height = VRMmdPlaybackController.PresentationHeightOffset;
+        float distance = VRMmdPlaybackController.PresentationDistanceOffset;
+        bool anyTrim = Mathf.Abs(yaw) >= 0.001f
+            || Mathf.Abs(pitch) >= 0.001f
+            || Mathf.Abs(height) >= 0.0001f
+            || Mathf.Abs(distance) >= 0.0001f;
+        if (!anyTrim)
+        {
+            if (poseMatches)
+            {
+                origin.rotation = baseRotation;
+                origin.position = basePosition;
+            }
+            ClearPresentationYawTracking();
+            return;
+        }
+
+        // Rebuild from the authored rig every frame. Yaw and pitch orbit the
+        // eye so the MMD camera centre stays put; height is the only shift.
+        origin.rotation = baseRotation;
+        origin.position = basePosition;
         Vector3 headPosition = head.position;
-        origin.rotation = targetRotation;
-        Vector3 positionCorrection = headPosition - head.position;
-        if (IsFinite(positionCorrection))
-            origin.position += positionCorrection;
+        if (!IsFinite(headPosition))
+        {
+            ClearPresentationYawTracking();
+            return;
+        }
 
+        if (Mathf.Abs(yaw) >= 0.001f)
+            origin.RotateAround(headPosition, Vector3.up, yaw);
+        if (Mathf.Abs(pitch) >= 0.001f)
+        {
+            Vector3 pitchAxis = head.right;
+            if (pitchAxis.sqrMagnitude > 0.0001f)
+                origin.RotateAround(head.position, pitchAxis, pitch);
+        }
+        if (Mathf.Abs(height) >= 0.0001f)
+            origin.position += Vector3.up * height;
+        if (Mathf.Abs(distance) >= 0.0001f)
+        {
+            Vector3 forward = head.forward;
+            if (forward.sqrMagnitude > 0.0001f)
+                origin.position += forward.normalized * distance;
+        }
+
+        if (!IsFinite(origin.position) || !IsFinite(origin.rotation))
+        {
+            origin.rotation = baseRotation;
+            origin.position = basePosition;
+            ClearPresentationYawTracking();
+            return;
+        }
+
+        _presentationYawBasePosition = basePosition;
         _presentationYawBaseRotation = baseRotation;
-        _presentationYawAppliedRotation = targetRotation;
+        _presentationYawAppliedPosition = origin.position;
+        _presentationYawAppliedRotation = origin.rotation;
         _presentationYawApplied = true;
     }
 
     private void ClearPresentationYawTracking()
     {
         _presentationYawApplied = false;
+        _presentationYawBasePosition = Vector3.zero;
         _presentationYawBaseRotation = Quaternion.identity;
+        _presentationYawAppliedPosition = Vector3.zero;
         _presentationYawAppliedRotation = Quaternion.identity;
     }
 
@@ -330,20 +400,31 @@ internal sealed class VRMmdCameraAnchorController : MonoBehaviour
         Transform origin;
         Transform head;
         if (TryGetVrRig(out origin, out head)
+            && IsFinite(origin.position)
             && IsFinite(origin.rotation)
+            && IsFinite(_presentationYawBasePosition)
             && IsFinite(_presentationYawBaseRotation)
-            && Quaternion.Angle(
+            && PresentationPoseMatches(
+                origin.position,
                 origin.rotation,
-                _presentationYawAppliedRotation) <= AppliedRotationMatchDegrees)
+                _presentationYawAppliedPosition,
+                _presentationYawAppliedRotation))
         {
-            Vector3 headPosition = head.position;
             origin.rotation = _presentationYawBaseRotation;
-            Vector3 positionCorrection = headPosition - head.position;
-            if (IsFinite(positionCorrection))
-                origin.position += positionCorrection;
+            origin.position = _presentationYawBasePosition;
         }
 
         ClearPresentationYawTracking();
+    }
+
+    private static bool PresentationPoseMatches(
+        Vector3 position,
+        Quaternion rotation,
+        Vector3 appliedPosition,
+        Quaternion appliedRotation)
+    {
+        return Vector3.Distance(position, appliedPosition) <= AppliedPositionMatchMeters
+            && Quaternion.Angle(rotation, appliedRotation) <= AppliedRotationMatchDegrees;
     }
 
     private static bool TryGetVrRig(out Transform origin, out Transform head)

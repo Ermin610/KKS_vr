@@ -62,6 +62,19 @@ internal class KKCharaStudioInterpreter : GameInterpreter
 		return null;
 	}
 
+#if KKS
+	public override bool IsAllowedEffect(MonoBehaviour effect)
+	{
+		// VRGIN copies every behaviour whose type name ends with "Effect" or
+		// contains "AmbientOcclusion" onto the eye camera, then disables the
+		// studio original. BloomAndFlares and DepthOfField never match that
+		// filter; AmplifyOcclusionEffect does, and Studio enables it by default.
+		if (!base.IsAllowedEffect(effect))
+			return false;
+		return effect == null || !VRCameraPerformance.BlocksCopiedEffect(((object)effect).GetType().Name);
+	}
+#endif
+
 	public override IActor FindNextActorToImpersonate()
 	{
 		List<IActor> list = Actors.ToList();
@@ -583,6 +596,11 @@ internal class KKCharaStudioInterpreter : GameInterpreter
 					val2.material = component.material;
 				}
 				VR.Camera.CopyFX(val);
+#if KKS
+				// CopyFX reapplies the studio camera. Keep HDR, bloom, occlusion,
+				// and outlines; only re-assert stereo and the comfort-only effects.
+				VRCameraPerformance.ApplyNow();
+#endif
 			}
 			else
 			{

@@ -55,7 +55,11 @@ internal sealed class VRLoader : MonoBehaviour
         try
         {
             KksOpenVrInputPatch.Install();
+            KksInputStartup.InstallBeforeRuntime();
             var settings = OpenVRSettings.GetSettings(true);
+            // KKS toon, hair, and the compiled ColorZOrder bundle have no
+            // single-pass instanced variants. MultiPass draws each eye with the
+            // ordinary view matrix, so those shaders stay in the correct eye.
             settings.StereoRenderingMode = OpenVRSettings.StereoRenderingModes.MultiPass;
             settings.InitializationType = OpenVRSettings.InitializationTypes.Scene;
             settings.EditorAppKey = "kss.charastudio.exe";
@@ -68,6 +72,7 @@ internal sealed class VRLoader : MonoBehaviour
             started = true;
             if (!loader.Start()) throw new InvalidOperationException("OpenVR loader start returned false.");
             SteamVR_Behaviour.Initialize(false);
+            KksInputStartup.ActivateActionSet();
             return true;
         }
         catch (Exception ex)
@@ -80,18 +85,26 @@ internal sealed class VRLoader : MonoBehaviour
 
     private void InitializeFeatures()
     {
+        Application.runInBackground = true;
+        KksBreastPhysicsGuard.Install();
         SaveLoadSceneHook.InstallHook();
         LoadFixHook.InstallHook();
         DropdownFixHook.InstallHook();
+        // VRSpawnPlacementHook is disabled to preserve Studio native default coordinates (world origin) for VMD alignment.
         KksCanvasCapture.Install();
+        VRVisualPluginHooks.Install();
+        VRMirrorFix.Install();
         VRManager.Create<KKCharaStudioInterpreter>(new ConfigurableContext());
+        VRGameCompatibility.InstallGameplayCameraGuards();
         VR.Manager.SetMode<GenericStandingMode>();
+        KksInputStartup.LogHands();
         var root = features = new GameObject("KKS VR Overhaul Features");
         DontDestroyOnLoad(root);
         IKTool.Create(root);
         VRControllerMgr.Install(root);
         VRCameraMoveHelper.Install(root);
         VRItemObjMoveHelper.Install(root);
+        VRSpawnPlacementHelper.Install(root);
         root.AddComponent<DynamicBoneColliderManager>();
         root.AddComponent<KKCharaStudioVRGUI>();
         root.AddComponent<VRHandModelManager>();
@@ -101,7 +114,9 @@ internal sealed class VRLoader : MonoBehaviour
         root.AddComponent<VRWristMenuController>();
         root.AddComponent<VRTimelineCameraFollowController>();
         root.AddComponent<VRComfortVignette>();
+        root.AddComponent<VRCameraPerformance>();
         root.AddComponent<VRTwoHandScale>();
+        root.AddComponent<VRPhysicalUndresser>();
         DontDestroyOnLoad(VRCamera.Instance.gameObject);
         VRLog.Info("KKS VR Overhaul initialized with the KKS XR runtime.");
     }
@@ -119,6 +134,7 @@ internal sealed class VRLoader : MonoBehaviour
         catch (Exception ex) { VRLog.Warn("KKS XR deinitialization failed: " + ex.Message); }
         finally { Destroy(releasing); }
     }
+
     private void OnDestroy()
     {
         if (features != null) { features.SetActive(false); Destroy(features); }

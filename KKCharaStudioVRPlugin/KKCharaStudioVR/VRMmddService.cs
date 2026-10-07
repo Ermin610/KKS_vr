@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Globalization;
 using System.Text;
+using Studio;
 using VRGIN.Core;
 
 namespace KKCharaStudioVR;
@@ -23,6 +25,9 @@ internal static class VRMmddService
     public const float MinFixedFov = 20f;
     public const float MaxFixedFov = 120f;
     private static int _characterReplacementSequence;
+    // Object references rather than dicKeys: a new scene reuses the keys for
+    // characters that never received a motion.
+    private static readonly List<OCIChar> MotionTargets = new List<OCIChar>();
 
     public static bool TryPrepareCharacterReplacement(
         int objectKey,
@@ -352,6 +357,7 @@ internal static class VRMmddService
             return false;
         }
 
+        MotionTargets.Remove(target.Character);
         int motionCount = VRMmddStateBridge.MmdClearMotionCount;
         int morphCount = VRMmddStateBridge.MmdClearMorphCount;
         int cameraCount = VRMmddStateBridge.MmdClearCameraCount;
@@ -377,6 +383,8 @@ internal static class VRMmddService
     {
         // MMDD's start path can evaluate its VR camera before our LateUpdate.
         // Preserve the current room-scale head offset across that first frame.
+        if (VRStudioInteractionPolicy.ShouldSanitizeBeforePlayback(VRMmddStateBridge.PlaybackIsPlaying))
+            SanitizeMotionTargetsForPlayback();
         VRMmdCameraAnchorController.PrepareForSynchronousCameraEvaluation();
         string code =
             BuildBootstrapCode()
@@ -402,6 +410,8 @@ internal static class VRMmddService
 
     public static bool StartPlayback(out string status)
     {
+        if (VRStudioInteractionPolicy.ShouldSanitizeBeforePlayback(VRMmddStateBridge.PlaybackIsPlaying))
+            SanitizeMotionTargetsForPlayback();
         VRMmdCameraAnchorController.PrepareForSynchronousCameraEvaluation();
         string code =
             BuildBootstrapCode()
@@ -525,6 +535,10 @@ internal static class VRMmddService
         }
 
         status = error;
+        // A failed read must not leave the last report, or a missing report,
+        // looking like playback. Presentation and the stick latch are cleared
+        // by the controller.
+        VRMmdPlaybackController.FailOpenBecauseStateUnreadable(error);
         return false;
     }
 
@@ -813,6 +827,9 @@ internal static class VRMmddService
         if (VRMmdPlaybackController.Instance != null)
             VRMmdPlaybackController.Instance.PrepareForPackageChange();
 
+        List<VRIkPosing.MmdPoseSanitizeResult> sanitized =
+            SanitizeMotionTargetsBeforeBind(motionPath, actorObjectKeys);
+
         string code = BuildLoadPackageCode(
             motionPath,
             cameraPath,
@@ -852,12 +869,22 @@ internal static class VRMmddService
                 VRMmdCameraAnchorController.CancelPreparedSynchronousCameraEvaluation();
             if (VRMmdPlaybackController.Instance != null)
                 VRMmdPlaybackController.Instance.NotifyPackageLoadFailed();
+            foreach (VRIkPosing.MmdPoseSanitizeResult result in sanitized)
+                VRIkPosing.RestoreAfterFailedMmdLoad(result);
             status = "VMD 载入失败：" + error;
             return false;
         }
 
         if (preparedLoadAnchor)
             VRMmdCameraAnchorController.CorrectAfterSynchronousCameraEvaluation();
+
+        foreach (VRIkPosing.MmdPoseSanitizeResult result in sanitized)
+        {
+            if (result.ReseatIkTargets)
+                VRIkPosing.ReseatIkTargets(result.Character);
+            if (!MotionTargets.Contains(result.Character))
+                MotionTargets.Add(result.Character);
+        }
 
         int[] liveActorKeys = VRVmdTargetService.ResolveLiveObjectKeys(actorObjectKeys);
         if (VRMmdPlaybackController.Instance != null)
@@ -883,6 +910,54 @@ internal static class VRMmddService
             message.Append(" 音频：").Append(audioName);
         status = message.ToString();
         return true;
+    }
+
+    private static List<VRIkPosing.MmdPoseSanitizeResult> SanitizeMotionTargetsBeforeBind(
+        string motionPath,
+        int[] actorObjectKeys)
+    {
+        List<VRIkPosing.MmdPoseSanitizeResult> results = new List<VRIkPosing.MmdPoseSanitizeResult>();
+        if (!VRStudioInteractionPolicy.ShouldSanitizeForVmdLoad(!string.IsNullOrEmpty(motionPath)))
+            return results;
+        foreach (OCIChar character in VRVmdTargetService.ResolveMotionTargets(actorObjectKeys))
+            results.Add(VRIkPosing.SanitizeCharacterForMmd(character, true));
+        return results;
+    }
+
+    private static void SanitizeMotionTargetsForPlayback()
+    {
+        Studio.Studio studio = Singleton<Studio.Studio>.Instance;
+        for (int i = MotionTargets.Count - 1; i >= 0; i--)
+        {
+            OCIChar character = MotionTargets[i];
+            if (!IsCurrentSceneCharacter(studio, character))
+            {
+                MotionTargets.RemoveAt(i);
+                continue;
+            }
+            VRIkPosing.MmdPoseSanitizeResult result = VRIkPosing.SanitizeCharacterForMmd(character, false);
+            if (result.ReseatIkTargets)
+                VRIkPosing.ReseatIkTargets(character);
+        }
+    }
+
+    private static bool IsCurrentSceneCharacter(Studio.Studio studio, OCIChar character)
+    {
+        try
+        {
+            ObjectCtrlInfo current;
+            return studio != null
+                && studio.dicObjectCtrl != null
+                && character != null
+                && character.charInfo != null
+                && character.objectInfo != null
+                && studio.dicObjectCtrl.TryGetValue(character.objectInfo.dicKey, out current)
+                && ReferenceEquals(current, character);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     private static string BuildBootstrapCode()

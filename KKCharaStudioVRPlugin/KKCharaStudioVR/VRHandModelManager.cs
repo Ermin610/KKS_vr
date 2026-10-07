@@ -42,6 +42,8 @@ namespace KKCharaStudioVR
             public bool nativeAccessoriesVisible;
             public bool trackedIndexInitialized;
             public SteamVR_TrackedObject.EIndex lastTrackedIndex;
+            public string loggedHiddenRenderModel;
+            public Collider[] solidColliders;
         }
 
         private HandContext leftHand;
@@ -58,7 +60,10 @@ namespace KKCharaStudioVR
         private static bool presentationSuppressed;
         private static bool scenePresentationSuppressed;
         private bool _lastPhysicsHandsEnabled;
+        private float _nextHandCollisionRefresh;
         private static PhysicMaterial _sharedFrictionless;
+        private static Transform _physicsAnchor;
+        private static bool _loggedRigidHands;
 
         public static VRHandModelManager Instance { get; private set; }
 
@@ -164,6 +169,7 @@ namespace KKCharaStudioVR
                 ConfigurePhysicsMode(leftHand, true, physicsEnabled);
                 ConfigurePhysicsMode(rightHand, false, physicsEnabled);
                 _lastPhysicsHandsEnabled = physicsEnabled;
+                VRHandCollision.Refresh();
                 VRLog.Info("Physics hands mode changed to: " + physicsEnabled);
             }
 
@@ -171,6 +177,26 @@ namespace KKCharaStudioVR
             float scale = settings != null ? settings.HandModelScale : 1.0f;
             UpdateSingleHand(leftHand, alpha, scale);
             UpdateSingleHand(rightHand, alpha, scale);
+            if (Time.unscaledTime >= _nextHandCollisionRefresh)
+            {
+                _nextHandCollisionRefresh = Time.unscaledTime + 1f;
+                VRHandCollision.Refresh();
+            }
+        }
+
+        void LateUpdate()
+        {
+            // SteamVR_RenderModel.Update and HideRenderModels run during Update
+            // and can enable the wand again after UpdateSingleHand. Re-apply
+            // after those, still before the camera renders.
+            if (!initialized)
+                return;
+            RehideNativeController(leftHand);
+            RehideNativeController(rightHand);
+            // Physics may write a rigidbody pose after Update. Pin again so the
+            // rendered frame matches the controller with no spring leftover.
+            PinHandPose(leftHand, true);
+            PinHandPose(rightHand, false);
         }
 
         public void SetHandVisible(bool isLeft, bool visible)
@@ -304,6 +330,14 @@ namespace KKCharaStudioVR
 
                 if (IsPresentationSuppressed)
                     SuppressHandPresentation(replacement);
+                else if (replacement.requestedVisible && replacement.cachedController != null)
+                {
+                    // Hide before the first Update. The mesh usually appears
+                    // a moment later; Update/LateUpdate keep it hidden.
+                    replacement.lastRenderModelHidden = true;
+                    replacement.cachedController.SetRenderModelVisible(false);
+                    LogNativeHide(replacement);
+                }
                 VRLog.Info((isLeft ? "Left" : "Right")
                     + " VR hand bound independently after " + reason + ".");
                 return true;
@@ -415,6 +449,27 @@ namespace KKCharaStudioVR
             return joints[joints.Count - 1].transform;
         }
 
+        public int CopyGrabSamplePoints(bool isLeft, Vector3[] buffer, int offset)
+        {
+            if (buffer == null || offset < 0 || offset >= buffer.Length) return 0;
+            HandContext h = isLeft ? leftHand : rightHand;
+            if (h == null || h.root == null || !h.root.activeInHierarchy) return 0;
+            int written = 0;
+            buffer[offset + written] = h.root.transform.position;
+            written++;
+            if (h.fingers == null) return written;
+            for (int i = 0; i < h.fingers.Length && offset + written < buffer.Length; i++)
+            {
+                FingerContext finger = h.fingers[i];
+                if (finger == null || finger.joints == null || finger.joints.Count == 0) continue;
+                Transform tip = finger.joints[finger.joints.Count - 1].transform;
+                if (tip == null) continue;
+                buffer[offset + written] = tip.position;
+                written++;
+            }
+            return written;
+        }
+
         /// <summary>
         /// 由 VRHandHapticTrigger 调用，通知手部正在触碰角色。
         /// </summary>
@@ -474,15 +529,12 @@ namespace KKCharaStudioVR
             if (!shouldShowCustomHand)
                 return;
 
-            // Apply custom offset and rotation
+            // Apply custom offset and rotation. The mesh stays a child of the
+            // tracker, so locomotion moves the hand 1:1 with the controller.
             bool isLeft = (h == leftHand);
             h.root.transform.localScale = Vector3.one * scale;
-
-            if (!IsPhysicsHandsEnabled())
-            {
-                h.root.transform.localPosition = GetTargetLocalPosition(isLeft);
-                h.root.transform.localRotation = GetTargetLocalRotation(isLeft);
-            }
+            ClampSolidColliders(h);
+            PinHandPose(h, isLeft);
 
             // 触摸反馈：接触角色时渐变为暖色
             h.touchFeedback = Mathf.Lerp(h.touchFeedback, 0f, Time.deltaTime * 4f);
@@ -541,12 +593,41 @@ namespace KKCharaStudioVR
             if (h == null || h.cachedController == null)
                 return;
 
-            bool hidden = !visible;
-            if (h.lastRenderModelHidden == hidden)
+            if (!visible)
+            {
+                // The render model often does not exist on the first hide.
+                // SteamVR adds enabled MeshRenderers when the load finishes,
+                // and again after a reconnect or dashboard focus. Keep hiding.
+                h.lastRenderModelHidden = true;
+                h.cachedController.SetRenderModelVisible(false);
+                LogNativeHide(h);
+                return;
+            }
+
+            if (!h.lastRenderModelHidden)
                 return;
 
-            h.lastRenderModelHidden = hidden;
-            h.cachedController.SetRenderModelVisible(visible);
+            h.lastRenderModelHidden = false;
+            h.loggedHiddenRenderModel = null;
+            h.cachedController.SetRenderModelVisible(true);
+        }
+
+        private static void RehideNativeController(HandContext h)
+        {
+            if (h == null || !h.lastRenderModelHidden || h.cachedController == null)
+                return;
+            h.cachedController.SetRenderModelVisible(false);
+        }
+
+        private static void LogNativeHide(HandContext h)
+        {
+            var model = h.cachedController.Model;
+            string name = model != null ? model.renderModelName : null;
+            if (string.IsNullOrEmpty(name) || name == h.loggedHiddenRenderModel)
+                return;
+            h.loggedHiddenRenderModel = name;
+            VRLog.Info("Hid native controller mesh '" + name
+                + "' while the custom hand is shown.");
         }
 
         private static void ForceHideNativeController(HandContext h)
@@ -558,6 +639,7 @@ namespace KKCharaStudioVR
             // state while tracking is invalid instead of trusting a stale cache.
             h.lastRenderModelHidden = true;
             h.cachedController.SetRenderModelVisible(false);
+            LogNativeHide(h);
         }
 
         private static void SetNativeAccessoriesVisible(
@@ -641,9 +723,17 @@ namespace KKCharaStudioVR
             bool loadedOfficial = false;
             try
             {
+                // KK ships hands in h/common/00_00.unity3d; KKS renamed the bundle to 01.unity3d.
+                // Trying the wrong path throws and used to drop every hand into the capsule fallback.
+#if KKS
+                string assetBundleName = "h/common/01.unity3d";
+                string fallbackBundleName = "h/common/00_00.unity3d";
+#else
                 string assetBundleName = "h/common/00_00.unity3d";
+                string fallbackBundleName = "h/common/01.unity3d";
+#endif
                 string assetName = isLeft ? "p_handL" : "p_handR";
-                GameObject handPrefab = CommonLib.LoadAsset<GameObject>(assetBundleName, assetName, true, null);
+                GameObject handPrefab = LoadOfficialHandPrefab(assetBundleName, fallbackBundleName, assetName);
 
                 if (handPrefab != null)
                 {
@@ -822,9 +912,39 @@ namespace KKCharaStudioVR
             }
 
             ConfigurePhysicsMode(ctx, isLeft, IsPhysicsHandsEnabled());
+            VRHandCollision.AdoptProxy(ctx.root);
+            VRHandCollision.Refresh();
             bool handEnabled = settings != null ? settings.HandModelEnabled : true;
             ctx.root.SetActive(handEnabled && !IsPresentationSuppressed);
             return ctx;
+        }
+
+        private static GameObject LoadOfficialHandPrefab(
+            string primaryBundle,
+            string fallbackBundle,
+            string assetName)
+        {
+            GameObject handPrefab = TryLoadHandAsset(primaryBundle, assetName);
+            if (handPrefab != null)
+                return handPrefab;
+
+            VRLog.Warn("Official hand asset '{0}' missing from '{1}'; trying '{2}'.",
+                assetName, primaryBundle, fallbackBundle);
+            return TryLoadHandAsset(fallbackBundle, assetName);
+        }
+
+        private static GameObject TryLoadHandAsset(string bundleName, string assetName)
+        {
+            try
+            {
+                return CommonLib.LoadAsset<GameObject>(bundleName, assetName, true, null);
+            }
+            catch (Exception ex)
+            {
+                VRLog.Warn("Failed loading hand '{0}' from '{1}': {2}",
+                    assetName, bundleName, ex.Message);
+                return null;
+            }
         }
 
         FingerContext CreateFinger(Transform parent, Vector3 pos, Quaternion rot, Material mat, int segments, float segLen, float thickness)
@@ -901,6 +1021,53 @@ namespace KKCharaStudioVR
             return settings != null ? settings.PhysicsHandsEnabled : true;
         }
 
+        internal static Transform PhysicsAnchor()
+        {
+            if (_physicsAnchor != null) return _physicsAnchor;
+            GameObject anchor = new GameObject("VRHandPhysicsAnchor");
+            UnityEngine.Object.DontDestroyOnLoad(anchor);
+            _physicsAnchor = anchor.transform;
+            _physicsAnchor.position = Vector3.zero;
+            _physicsAnchor.rotation = Quaternion.identity;
+            _physicsAnchor.localScale = Vector3.one;
+            return _physicsAnchor;
+        }
+
+        private static void ClampSolidColliders(HandContext h)
+        {
+            if (h == null || h.root == null) return;
+            if (h.solidColliders == null)
+                h.solidColliders = h.root.GetComponentsInChildren<Collider>(true);
+            const float maxExtent = 0.08f;
+            for (int i = 0; i < h.solidColliders.Length; i++)
+            {
+                Collider col = h.solidColliders[i];
+                if (col == null || !col.enabled || col.isTrigger) continue;
+                Vector3 extents = col.bounds.extents;
+                float largest = Mathf.Max(extents.x, Mathf.Max(extents.y, extents.z));
+                if (largest <= maxExtent || largest < 0.0001f) continue;
+                float factor = maxExtent / largest;
+                BoxCollider box = col as BoxCollider;
+                if (box != null)
+                {
+                    box.size *= factor;
+                    continue;
+                }
+                SphereCollider sphere = col as SphereCollider;
+                if (sphere != null)
+                {
+                    sphere.radius *= factor;
+                    continue;
+                }
+                CapsuleCollider capsule = col as CapsuleCollider;
+                if (capsule != null)
+                {
+                    capsule.radius *= factor;
+                    capsule.height *= factor;
+                }
+            }
+        }
+
         private Vector3 GetTargetLocalPosition(bool isLeft)
         {
             float xOffset = settings != null ? settings.HandOffsetX : 0f;
@@ -918,55 +1085,70 @@ namespace KKCharaStudioVR
             return Quaternion.Euler(pitch, isLeft ? yaw : -yaw, baseRoll + (isLeft ? roll : -roll));
         }
 
+        private void PinHandPose(HandContext h, bool isLeft)
+        {
+            if (h == null || h.root == null || h.trackedObj == null || h.trackedObj.transform == null)
+                return;
+            Transform tracker = h.trackedObj.transform;
+            Transform root = h.root.transform;
+            if (root.parent != tracker)
+                root.SetParent(tracker, false);
+            root.localPosition = GetTargetLocalPosition(isLeft);
+            root.localRotation = GetTargetLocalRotation(isLeft);
+            Rigidbody rb = h.cachedRigidbody;
+            if (rb != null && !rb.isKinematic)
+            {
+                rb.velocity = Vector3.zero;
+                rb.angularVelocity = Vector3.zero;
+                rb.isKinematic = true;
+            }
+        }
+
         private void ConfigurePhysicsMode(HandContext h, bool isLeft, bool enabled)
         {
             if (h == null || h.root == null || h.trackedObj == null || h.trackedObj.transform == null) return;
 
             SetHandCollisionState(h, false);
             Transform tracker = h.trackedObj.transform;
-            Vector3 localPosition = GetTargetLocalPosition(isLeft);
-            Quaternion localRotation = GetTargetLocalRotation(isLeft);
 
-            if (enabled)
+            if (enabled && h.cachedRigidbody == null)
+                h.cachedRigidbody = h.root.AddComponent<Rigidbody>();
+
+            if (h.cachedRigidbody != null)
             {
-                if (h.cachedRigidbody == null)
-                    h.cachedRigidbody = h.root.AddComponent<Rigidbody>();
-
                 Rigidbody rb = h.cachedRigidbody;
                 rb.detectCollisions = false;
-                rb.isKinematic = true;
-                rb.velocity = Vector3.zero;
-                rb.angularVelocity = Vector3.zero;
-
-                h.root.transform.SetParent(tracker.parent, true);
-                h.root.transform.position = tracker.TransformPoint(localPosition);
-                h.root.transform.rotation = tracker.rotation * localRotation;
-                rb.position = h.root.transform.position;
-                rb.rotation = h.root.transform.rotation;
-                rb.useGravity = false;
-                rb.mass = 1.0f;
-                rb.drag = 0.5f;
-                rb.angularDrag = 0.5f;
-                rb.interpolation = RigidbodyInterpolation.Interpolate;
-                rb.maxAngularVelocity = 20.0f;
-                rb.isKinematic = false;
-                rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
-                rb.detectCollisions = true;
-                SetHandCollisionState(h, true);
-            }
-            else
-            {
-                if (h.cachedRigidbody != null)
+                // Clear velocity while the body can still accept it, then lock
+                // it kinematic. A dynamic body with a 5 m/s cap trails the
+                // controller during locomotion and springs back when the stick
+                // is released.
+                if (!rb.isKinematic)
                 {
-                    h.cachedRigidbody.detectCollisions = false;
-                    h.cachedRigidbody.velocity = Vector3.zero;
-                    h.cachedRigidbody.angularVelocity = Vector3.zero;
-                    h.cachedRigidbody.isKinematic = true;
+                    rb.velocity = Vector3.zero;
+                    rb.angularVelocity = Vector3.zero;
                 }
+                rb.isKinematic = true;
+                rb.useGravity = false;
+                rb.interpolation = RigidbodyInterpolation.None;
+                rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
+            }
 
-                h.root.transform.SetParent(tracker, false);
-                h.root.transform.localPosition = localPosition;
-                h.root.transform.localRotation = localRotation;
+            // Always a child of the tracker. localPosition is the hand offset,
+            // so the mesh matches the controller with no world-space lag.
+            h.root.transform.SetParent(tracker, false);
+            h.root.transform.localPosition = GetTargetLocalPosition(isLeft);
+            h.root.transform.localRotation = GetTargetLocalRotation(isLeft);
+
+            if (enabled && h.cachedRigidbody != null)
+            {
+                h.cachedRigidbody.detectCollisions = true;
+                SetHandCollisionState(h, true);
+                h.solidColliders = null;
+                if (!_loggedRigidHands)
+                {
+                    _loggedRigidHands = true;
+                    VRLog.Info("VR hands stay on the controller. Locomotion no longer drags them through a world-space spring.");
+                }
             }
         }
 
@@ -1091,96 +1273,6 @@ namespace KKCharaStudioVR
             }
         }
 
-        void FixedUpdate()
-        {
-            if (!initialized) return;
-
-            if (!IsPhysicsHandsEnabled()) return;
-
-            UpdateHandPhysics(leftHand, true);
-            UpdateHandPhysics(rightHand, false);
-        }
-
-        private void UpdateHandPhysics(HandContext h, bool isLeft)
-        {
-            if (h == null || h.root == null || h.trackedObj == null || h.trackedObj.transform == null) return;
-            if (!h.root.activeSelf) return;
-
-            var rb = h.cachedRigidbody;
-            if (rb == null) return;
-
-            Vector3 targetLocalPos = GetTargetLocalPosition(isLeft);
-            Quaternion targetLocalRot = GetTargetLocalRotation(isLeft);
-
-            // Convert to global space targets
-            Transform tracker = h.trackedObj.transform;
-            Vector3 targetPos = tracker.TransformPoint(targetLocalPos);
-            Quaternion targetRot = tracker.rotation * targetLocalRot;
-
-            // 1. Position tracking (Velocity-based)
-            Vector3 deltaPos = targetPos - rb.position;
-            if (float.IsNaN(deltaPos.x) || float.IsNaN(deltaPos.y) || float.IsNaN(deltaPos.z) ||
-                float.IsInfinity(deltaPos.x) || float.IsInfinity(deltaPos.y) || float.IsInfinity(deltaPos.z))
-            {
-                rb.velocity = Vector3.zero;
-            }
-            else
-            {
-                // Soft spring tracking (20.0f spring factor) for smooth compliant touch
-                Vector3 desiredVelocity = deltaPos * 20.0f;
-                float maxVelocity = 5.0f;
-                if (desiredVelocity.magnitude > maxVelocity)
-                {
-                    desiredVelocity = desiredVelocity.normalized * maxVelocity;
-                }
-                rb.velocity = desiredVelocity;
-            }
-
-            // 2. Rotation tracking (Angular velocity-based)
-            Quaternion deltaRot = targetRot * Quaternion.Inverse(rb.rotation);
-            deltaRot.ToAngleAxis(out float angle, out Vector3 axis);
-            if (angle > 180f) angle -= 360f;
-
-            if (Mathf.Abs(angle) > 0.1f && axis.sqrMagnitude > 0.0001f)
-            {
-                if (!float.IsNaN(axis.x) && !float.IsNaN(axis.y) && !float.IsNaN(axis.z) &&
-                    !float.IsInfinity(axis.x) && !float.IsInfinity(axis.y) && !float.IsInfinity(axis.z))
-                {
-                    // Soft spring tracking (20.0f spring factor) for smooth compliant rotation
-                    Vector3 desiredAngularVelocity = axis.normalized * (angle * Mathf.Deg2Rad * 20.0f);
-                    if (!float.IsNaN(desiredAngularVelocity.x) && !float.IsInfinity(desiredAngularVelocity.x))
-                    {
-                        float maxAngularVelocity = 20.0f;
-                        if (desiredAngularVelocity.magnitude > maxAngularVelocity)
-                        {
-                            desiredAngularVelocity = desiredAngularVelocity.normalized * maxAngularVelocity;
-                        }
-                        rb.angularVelocity = desiredAngularVelocity;
-                    }
-                    else
-                    {
-                        rb.angularVelocity = Vector3.zero;
-                    }
-                }
-                else
-                {
-                    rb.angularVelocity = Vector3.zero;
-                }
-            }
-            else
-            {
-                rb.angularVelocity = Vector3.zero;
-            }
-
-            // 3. Teleport fallback if too far (e.g., stuck in geometry)
-            if (deltaPos.magnitude > 0.4f)
-            {
-                rb.position = targetPos;
-                rb.rotation = targetRot;
-                rb.velocity = Vector3.zero;
-                rb.angularVelocity = Vector3.zero;
-            }
-        }
 
         private void OnDestroy()
         {

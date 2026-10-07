@@ -158,27 +158,31 @@ internal static class VRReShadeRuntimeService
         detail = string.Empty;
         VRReShadeSnapshot snapshot = GetSnapshot();
         connectionState = snapshot.ConnectionState;
-        if (!CanIssueBridgeRequest(snapshot, out detail))
-            return false;
-
-        try
+        if (CanIssueBridgeRequest(snapshot, out detail))
         {
-            int result = KKVR_ReShade_RequestEffects(enabled ? 1 : 0);
-            if (result <= 0)
+            try
             {
-                detail = "ReShade bridge rejected the request (" + result + ")";
-                return false;
+                int result = KKVR_ReShade_RequestEffects(enabled ? 1 : 0);
+                if (result <= 0)
+                {
+                    detail = "ReShade bridge rejected the request (" + result + ")";
+                    return false;
+                }
+                queuedUntilRuntime = result == 2;
+                return true;
             }
-            queuedUntilRuntime = result == 2;
-            return true;
+            catch (Exception ex)
+            {
+                detail = DescribeInteropFailure(ex);
+                LogBridgeFailureOnce(detail);
+                connectionState = VRReShadeConnectionState.BridgeUnavailable;
+            }
         }
-        catch (Exception ex)
-        {
-            detail = DescribeInteropFailure(ex);
-            LogBridgeFailureOnce(detail);
-            connectionState = VRReShadeConnectionState.BridgeUnavailable;
-            return false;
-        }
+
+        // Bridge unavailable fallback: simulate End key (KeyEffects)
+        KeyboradSimulatorUtil.PressEndKey();
+        detail = "Toggled ReShade via hotkey";
+        return true;
     }
 
     internal static bool TrySelectPreset(
@@ -194,34 +198,40 @@ internal static class VRReShadeRuntimeService
         detail = string.Empty;
         VRReShadeSnapshot snapshot = GetSnapshot();
         connectionState = snapshot.ConnectionState;
-        if (!CanIssueBridgeRequest(snapshot, out detail))
-            return false;
+
         if (string.IsNullOrEmpty(presetPath))
         {
             detail = "Preset file was not found";
             return false;
         }
 
-        try
+        WriteConfiguredPresetPath(presetPath);
+
+        if (CanIssueBridgeRequest(snapshot, out detail))
         {
-            int result = KKVR_ReShade_RequestPreset(presetPath, enableEffects ? 1 : 0);
-            if (result <= 0)
+            try
             {
-                detail = result == -2
-                    ? "Preset file is no longer available"
-                    : "ReShade bridge rejected the request (" + result + ")";
-                return false;
+                int result = KKVR_ReShade_RequestPreset(presetPath, enableEffects ? 1 : 0);
+                if (result <= 0)
+                {
+                    detail = result == -2
+                        ? "Preset file is no longer available"
+                        : "ReShade bridge rejected the request (" + result + ")";
+                    return false;
+                }
+                queuedUntilRuntime = result == 2;
+                return true;
             }
-            queuedUntilRuntime = result == 2;
-            return true;
+            catch (Exception ex)
+            {
+                detail = DescribeInteropFailure(ex);
+                LogBridgeFailureOnce(detail);
+                connectionState = VRReShadeConnectionState.BridgeUnavailable;
+            }
         }
-        catch (Exception ex)
-        {
-            detail = DescribeInteropFailure(ex);
-            LogBridgeFailureOnce(detail);
-            connectionState = VRReShadeConnectionState.BridgeUnavailable;
-            return false;
-        }
+
+        detail = "Preset path saved to ReShade config";
+        return true;
     }
 
     internal static bool TrySwitchPreset(
@@ -239,8 +249,6 @@ internal static class VRReShadeRuntimeService
 
         VRReShadeSnapshot snapshot = GetSnapshot();
         connectionState = snapshot.ConnectionState;
-        if (!CanIssueBridgeRequest(snapshot, out detail))
-            return false;
 
         List<string> presets = GetPresetFiles();
         if (presets.Count == 0)
@@ -260,6 +268,16 @@ internal static class VRReShadeRuntimeService
             index = index <= 0 ? presets.Count - 1 : index - 1;
         else
             index = index < 0 || index >= presets.Count - 1 ? 0 : index + 1;
+
+        // PageUp/PageDown and the bridge both change the preset. Doing both
+        // lets the keyboard land on a different file than the one just selected.
+        if (!CanIssueBridgeRequest(snapshot, out detail))
+        {
+            if (direction > 0)
+                KeyboradSimulatorUtil.PressPageDown();
+            else if (direction < 0)
+                KeyboradSimulatorUtil.PressPageUp();
+        }
 
         return TrySelectPreset(
             presets[index],
@@ -283,23 +301,14 @@ internal static class VRReShadeRuntimeService
         var result = new List<string>();
         try
         {
-            string directory = GetPresetDirectory();
-            if (!Directory.Exists(directory))
-                return result;
-
-            foreach (string candidate in Directory.GetFiles(
-                         directory, "*", SearchOption.TopDirectoryOnly))
-            {
-                if (!string.Equals(
-                        Path.GetExtension(candidate), ".ini", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                string resolved = ResolveExistingPresetPath(candidate);
-                if (!string.IsNullOrEmpty(resolved) && FindPathIndex(result, resolved) < 0)
-                    result.Add(resolved);
-            }
+            string rootDir = GetGameRoot();
+            // ReShade's overlay lists every preset ini in the directory that
+            // contains the current preset. The selectable catalog is that same
+            // directory, not the single file that happens to sit in reshade-shaders.
+            AddPresetDirectory(result, Path.Combine(rootDir, "reshade-presets"));
+            AddPresetShortcutPaths(result, Path.Combine(rootDir, "ReShadeVR.ini"));
+            AddPresetShortcutPaths(result, Path.Combine(rootDir, "ReShade.ini"));
+            AddPresetDirectory(result, Path.Combine(rootDir, "reshade-shaders"));
         }
         catch (Exception ex)
         {
@@ -534,10 +543,163 @@ internal static class VRReShadeRuntimeService
     private static string ReadConfiguredPresetPath()
     {
         string root = GetGameRoot();
-        string value = ReadIniValue(Path.Combine(root, "ReShadeVR.ini"), "GENERAL", "PresetPath");
+        string value = ReadIniValue(Path.Combine(root, "ReShadeVR.ini"), "GENERAL", "CurrentPresetPath");
+        if (string.IsNullOrEmpty(value))
+            value = ReadIniValue(Path.Combine(root, "ReShadeVR.ini"), "GENERAL", "PresetPath");
+        if (string.IsNullOrEmpty(value))
+            value = ReadIniValue(Path.Combine(root, "ReShade.ini"), "GENERAL", "CurrentPresetPath");
         if (string.IsNullOrEmpty(value))
             value = ReadIniValue(Path.Combine(root, "ReShade.ini"), "GENERAL", "PresetPath");
         return value;
+    }
+
+    internal static void WriteConfiguredPresetPath(string presetPath)
+    {
+        if (string.IsNullOrEmpty(presetPath))
+            return;
+        string root = GetGameRoot();
+        string vrIni = Path.Combine(root, "ReShadeVR.ini");
+        string desktopIni = Path.Combine(root, "ReShade.ini");
+        string canonical = PreferPresetDirectoryCopy(presetPath);
+        string written = ToReShadeConfigPath(canonical);
+        WriteIniValue(vrIni, "GENERAL", "CurrentPresetPath", written);
+        WriteIniValue(vrIni, "GENERAL", "PresetPath", written);
+        WriteIniValue(desktopIni, "GENERAL", "CurrentPresetPath", written);
+        WriteIniValue(desktopIni, "GENERAL", "PresetPath", written);
+
+        // PresetShortcutPaths is the explicit list ReShade keeps beside the
+        // directory scan. Point every entry at reshade-presets so the overlay
+        // and the next/previous keys stay on the full catalog.
+        List<string> allPresets = GetPresetFiles();
+        if (allPresets.Count > 0)
+        {
+            var shortcutPaths = new List<string>(allPresets.Count);
+            for (int i = 0; i < allPresets.Count; i++)
+                shortcutPaths.Add(ToReShadeConfigPath(allPresets[i]));
+            string shortcuts = string.Join(",", shortcutPaths.ToArray());
+            WriteIniValue(vrIni, "GENERAL", "PresetShortcutPaths", shortcuts);
+            WriteIniValue(desktopIni, "GENERAL", "PresetShortcutPaths", shortcuts);
+        }
+    }
+
+    private static void AddPresetDirectory(List<string> result, string directory)
+    {
+        if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory))
+            return;
+        foreach (string candidate in Directory.GetFiles(directory, "*.ini", SearchOption.TopDirectoryOnly))
+            AddUniquePreset(result, candidate);
+    }
+
+    private static void AddPresetShortcutPaths(List<string> result, string iniPath)
+    {
+        string shortcutPaths = ReadIniValue(iniPath, "GENERAL", "PresetShortcutPaths");
+        if (string.IsNullOrEmpty(shortcutPaths))
+            return;
+        foreach (string rawPath in shortcutPaths.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+            AddUniquePreset(result, rawPath.Trim().Trim('"'));
+    }
+
+    private static void AddUniquePreset(List<string> result, string candidate)
+    {
+        string resolved = ResolveExistingPresetPath(candidate);
+        if (string.IsNullOrEmpty(resolved))
+            resolved = ResolveExistingPresetPath(PreferPresetDirectoryCopy(candidate));
+        if (string.IsNullOrEmpty(resolved)
+            || FindPathIndex(result, resolved) >= 0
+            || FindFileNameIndex(result, resolved) >= 0)
+        {
+            return;
+        }
+        result.Add(resolved);
+    }
+
+    private static string PreferPresetDirectoryCopy(string presetPath)
+    {
+        if (string.IsNullOrEmpty(presetPath))
+            return presetPath;
+        try
+        {
+            string preferred = Path.Combine(GetPresetDirectory(), Path.GetFileName(presetPath));
+            string resolved = ResolveExistingPresetPath(preferred);
+            if (!string.IsNullOrEmpty(resolved))
+                return resolved;
+        }
+        catch
+        {
+            // Keep the caller's path when the file name cannot be read.
+        }
+        string existing = ResolveExistingPresetPath(presetPath);
+        return string.IsNullOrEmpty(existing) ? presetPath : existing;
+    }
+
+    private static string ToReShadeConfigPath(string fullPath)
+    {
+        string normalized = NormalizePath(fullPath);
+        if (string.IsNullOrEmpty(normalized))
+            return fullPath;
+        string root = NormalizePath(GetGameRoot());
+        if (!string.IsNullOrEmpty(root))
+        {
+            string prefix = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+            if (normalized.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                string relative = normalized.Substring(prefix.Length).Replace('/', '\\');
+                return ".\\" + relative;
+            }
+        }
+        return normalized;
+    }
+
+    private static void WriteIniValue(string path, string section, string key, string value)
+    {
+        if (!File.Exists(path))
+            return;
+        try
+        {
+            var lines = new List<string>(File.ReadAllLines(path));
+            bool inSection = false;
+            bool foundKey = false;
+            int sectionEndIndex = -1;
+
+            for (int i = 0; i < lines.Count; i++)
+            {
+                string line = lines[i].Trim();
+                if (line.StartsWith("[") && line.EndsWith("]"))
+                {
+                    if (inSection)
+                    {
+                        sectionEndIndex = i;
+                        break;
+                    }
+                    inSection = string.Equals(
+                        line.Substring(1, line.Length - 2), section, StringComparison.OrdinalIgnoreCase);
+                    continue;
+                }
+                if (!inSection)
+                    continue;
+
+                int equals = line.IndexOf('=');
+                if (equals > 0 && string.Equals(line.Substring(0, equals).Trim(), key, StringComparison.OrdinalIgnoreCase))
+                {
+                    lines[i] = key + "=" + value;
+                    foundKey = true;
+                    break;
+                }
+            }
+
+            if (!foundKey && inSection)
+            {
+                int insertPos = sectionEndIndex >= 0 ? sectionEndIndex : lines.Count;
+                lines.Insert(insertPos, key + "=" + value);
+            }
+
+            File.WriteAllLines(path, lines.ToArray());
+        }
+        catch (Exception ex)
+        {
+            VRLog.Error("Unable to write ReShade configuration '" + path + "': " + ex.Message);
+        }
     }
 
     private static string ReadIniValue(string path, string section, string key)
@@ -600,8 +762,8 @@ internal static class VRReShadeRuntimeService
             }
             else
             {
-                AddRootCandidate(candidates, Path.Combine(GetGameRoot(), trimmed));
                 AddRootCandidate(candidates, Path.Combine(GetPresetDirectory(), trimmed));
+                AddRootCandidate(candidates, Path.Combine(GetGameRoot(), trimmed));
             }
         }
         catch
@@ -622,26 +784,32 @@ internal static class VRReShadeRuntimeService
 
         string fileName = Path.GetFileName(path);
         if (string.Equals(fileName, "ReShade.ini", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(fileName, "ReShadeVR.ini", StringComparison.OrdinalIgnoreCase))
+            || string.Equals(fileName, "ReShadeVR.ini", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(fileName, "doorstop_config.ini", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(fileName, "config.ini", StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }
 
         try
         {
-            // Every ReShade preset written by the runtime contains at least
-            // one of these top-level catalog keys, including an empty preset.
+            // Every ReShade preset contains either Techniques/TechniqueSorting or [*.fx] section headers
             foreach (string rawLine in File.ReadAllLines(path))
             {
                 string line = rawLine.Trim();
                 if (line.Length == 0 || line[0] == ';' || line[0] == '#')
                     continue;
                 int equals = line.IndexOf('=');
-                if (equals <= 0)
-                    continue;
-                string key = line.Substring(0, equals).Trim();
-                if (string.Equals(key, "Techniques", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(key, "TechniqueSorting", StringComparison.OrdinalIgnoreCase))
+                if (equals > 0)
+                {
+                    string key = line.Substring(0, equals).Trim();
+                    if (string.Equals(key, "Techniques", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(key, "TechniqueSorting", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+                if (line.StartsWith("[") && line.EndsWith(".fx]"))
                 {
                     return true;
                 }
@@ -677,6 +845,17 @@ internal static class VRReShadeRuntimeService
     private static string NormalizePath(string path)
     {
         return ResolvePath(path, false);
+    }
+
+    private static int FindFileNameIndex(List<string> paths, string target)
+    {
+        string name = Path.GetFileName(target);
+        for (int i = 0; i < paths.Count; i++)
+        {
+            if (string.Equals(Path.GetFileName(paths[i]), name, StringComparison.OrdinalIgnoreCase))
+                return i;
+        }
+        return -1;
     }
 
     private static int FindPathIndex(List<string> paths, string target)
@@ -772,6 +951,9 @@ internal static class VRReShadeRuntimeService
 
     private static string GetPresetDirectory()
     {
+        string presetDir = Path.Combine(GetGameRoot(), "reshade-presets");
+        if (Directory.Exists(presetDir))
+            return presetDir;
         return Path.Combine(GetGameRoot(), "reshade-shaders");
     }
 

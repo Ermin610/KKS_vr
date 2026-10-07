@@ -24,6 +24,8 @@ namespace KKCharaStudioVR
 		private static int activeSceneTransitionGeneration;
 		private static int lastCompletedSceneTransitionGeneration;
 		private static bool sceneTransitionActive;
+		public static bool IsSceneTransitionActive => sceneTransitionActive;
+		private const float SceneLoadWatchdogSeconds = 180f;
 
 		public static void InstallHook()
 		{
@@ -53,14 +55,58 @@ namespace KKCharaStudioVR
 					activeSceneTransitionGeneration);
 				VRHandModelManager.SetPresentationSuppressionRequested(true);
 			}
+			ArmSceneTransitionWatchdog(activeSceneTransitionGeneration);
 			return activeSceneTransitionGeneration;
+		}
+
+		private static void ArmSceneTransitionWatchdog(int generation)
+		{
+			MonoBehaviour host = Singleton<Studio.Studio>.Instance;
+			if (host == null)
+				host = VRCameraMoveHelper.Instance;
+			if (host == null && VR.Manager != null)
+				host = VR.Manager as MonoBehaviour;
+			if (host == null)
+			{
+				Logger.Log((LogLevel)4,
+					(object)("Scene transition watchdog has no host (generation "
+						+ generation + ")."));
+				return;
+			}
+			host.StartCoroutine(SceneTransitionWatchdog(generation));
+		}
+
+		private static IEnumerator SceneTransitionWatchdog(int generation)
+		{
+			float deadline = Time.realtimeSinceStartup + SceneLoadWatchdogSeconds;
+			while (sceneTransitionActive && activeSceneTransitionGeneration == generation)
+			{
+				if (Time.realtimeSinceStartup >= deadline)
+				{
+					FailSceneTransition(
+						generation,
+						"scene transition watchdog expired");
+					yield break;
+				}
+				yield return null;
+			}
+		}
+
+		[HarmonyPrefix]
+		[HarmonyPatch(typeof(SceneLoadScene), "OnClickLoad", new Type[] { }, null)]
+		public static void OnClickLoadPreHook()
+		{
+			// Match the original KK behaviour: arm VR recovery before Studio tears
+			// controllers down during map load, so the later coroutine completion
+			// can rebuild from a known transition generation.
+			PrepareSceneLoad("SceneLoadScene.OnClickLoad");
 		}
 
 		[HarmonyPrefix]
 		[HarmonyPatch(typeof(Studio.Studio), "LoadScene", new Type[] { typeof(string) }, null)]
 		public static void LoadScenePreHook(out int __state)
 		{
-			__state = BeginSceneTransition("Studio.LoadScene", false);
+			__state = BeginSceneTransition("Studio.LoadScene", true);
 		}
 
 		[HarmonyPostfix]
@@ -102,10 +148,19 @@ namespace KKCharaStudioVR
 		{
 			bool completed = false;
 			Exception failure = null;
+			float deadline = Time.realtimeSinceStartup + SceneLoadWatchdogSeconds;
 			try
 			{
 				while (inner != null)
 				{
+					if (Time.realtimeSinceStartup >= deadline)
+					{
+						failure = new TimeoutException(
+							"Studio.LoadSceneCoroutine exceeded "
+							+ SceneLoadWatchdogSeconds + "s without finishing");
+						break;
+					}
+
 					bool moved = false;
 					object current = null;
 					try
@@ -155,7 +210,7 @@ namespace KKCharaStudioVR
 					string reason = failure != null
 						? "Studio.LoadSceneCoroutine threw an exception"
 						: "Studio.LoadSceneCoroutine was interrupted";
-					Logger.Log((LogLevel)2, (object)reason);
+					Logger.Log((LogLevel)2, (object)(reason + ": " + failure));
 					FailSceneTransition(generation, reason);
 				}
 			}
@@ -222,7 +277,8 @@ namespace KKCharaStudioVR
 			sceneTransitionActive = false;
 			lastCompletedSceneTransitionGeneration = generation;
 			VRTimelineCameraFollowController.CompleteSceneTransition(generation);
-			VRHandModelManager.SetPresentationSuppressionRequested(false);
+			VRMmdPlaybackController.ClearExternalPresentationSuppression(
+				"scene load completed generation " + generation);
 			Logger.Log((LogLevel)32,
 				(object)("Scene loaded successfully (generation " + generation
 					+ "). Starting post-load recovery."));
@@ -239,7 +295,8 @@ namespace KKCharaStudioVR
 			sceneTransitionActive = false;
 			lastCompletedSceneTransitionGeneration = generation;
 			VRTimelineCameraFollowController.CompleteSceneTransition(generation);
-			VRHandModelManager.SetPresentationSuppressionRequested(false);
+			VRMmdPlaybackController.ClearExternalPresentationSuppression(
+				"scene load failed generation " + generation + ": " + reason);
 			Logger.Log((LogLevel)2,
 				(object)(reason + " (generation " + generation + ")."));
 			RequestVRRecovery(reason);
@@ -270,13 +327,22 @@ namespace KKCharaStudioVR
 			if (!IsLatestCompletedGeneration(generation))
 				yield break;
 
+			float deadline = Time.realtimeSinceStartup + 60f;
 			var sceneManager = Singleton<Manager.Scene>.Instance;
 			if (sceneManager != null)
 			{
 				while (VRGameCompatibility.IsLoading)
 				{
-					if (!IsLatestCompletedGeneration(generation))
+					if (!IsLatestCompletedGeneration(generation)
+						|| Time.realtimeSinceStartup >= deadline)
+					{
+						if (Time.realtimeSinceStartup >= deadline)
+						{
+							Logger.Log((LogLevel)4,
+								(object)"AlignVRCameraAfterLoadCo: timed out waiting for Manager.Scene loading flags.");
+						}
 						yield break;
+					}
 					yield return null;
 				}
 			}
@@ -304,7 +370,7 @@ namespace KKCharaStudioVR
 			}
 
 			Logger.Log((LogLevel)32, (object)"AlignVRCameraAfterLoadCo: Repositioning the main floating studio UI quad in front of the camera.");
-			float dist = 0.5f;
+			float dist = KKCharaStudioVRSettings.DefaultUISpawnDistance;
 			var settings = VR.Manager.Context.Settings as KKCharaStudioVRSettings;
 			if (settings != null)
 			{
@@ -319,8 +385,12 @@ namespace KKCharaStudioVR
 				&& generation == lastCompletedSceneTransitionGeneration;
 		}
 
+		private static bool _companionCameraSyncChecked;
+		private static bool _companionCameraSyncLoaded;
 		private static bool IsCompanionCameraSyncLoaded()
 		{
+			if (_companionCameraSyncChecked)
+				return _companionCameraSyncLoaded;
 			foreach (System.Reflection.Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
 			{
 				if (string.Equals(
@@ -328,6 +398,8 @@ namespace KKCharaStudioVR
 					VRGameCompatibility.CameraSyncAssemblyName,
 					StringComparison.OrdinalIgnoreCase))
 				{
+					_companionCameraSyncLoaded = true;
+					_companionCameraSyncChecked = true;
 					return true;
 				}
 			}

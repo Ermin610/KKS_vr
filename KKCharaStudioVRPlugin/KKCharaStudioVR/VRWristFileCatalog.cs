@@ -316,6 +316,82 @@ internal static class VRWristFileCatalog
         }
     }
 
+    public static string FormatFolderBadge(string displayName)
+    {
+        string name = string.IsNullOrEmpty(displayName) ? "文件夹" : displayName.Trim();
+        return "[📁 " + name + "]";
+    }
+
+    public static bool IsSameDirectory(string left, string right)
+    {
+        if (string.IsNullOrEmpty(left) || string.IsNullOrEmpty(right))
+            return false;
+        try
+        {
+            string a = Path.GetFullPath(left).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string b = Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    public static bool CanAscend(string root, string directory)
+    {
+        if (string.IsNullOrEmpty(root) || string.IsNullOrEmpty(directory))
+            return false;
+        try
+        {
+            if (IsSameDirectory(root, directory))
+                return false;
+            string parent = Path.GetDirectoryName(Path.GetFullPath(directory));
+            return !string.IsNullOrEmpty(parent) && IsInsideRoot(root, parent);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    public static string BuildBreadcrumb(string root, string directory)
+    {
+        if (string.IsNullOrEmpty(directory))
+            return string.Empty;
+        try
+        {
+            string fullRoot = string.IsNullOrEmpty(root)
+                ? string.Empty
+                : Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string fullDirectory = Path.GetFullPath(directory)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string rootName = string.IsNullOrEmpty(fullRoot)
+                ? string.Empty
+                : Path.GetFileName(fullRoot);
+            if (string.IsNullOrEmpty(rootName))
+                rootName = fullRoot;
+
+            if (string.IsNullOrEmpty(fullRoot)
+                || string.Equals(fullRoot, fullDirectory, StringComparison.OrdinalIgnoreCase))
+                return string.IsNullOrEmpty(rootName) ? fullDirectory : rootName;
+
+            if (!fullDirectory.StartsWith(fullRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                return Path.GetFileName(fullDirectory);
+
+            string relative = fullDirectory.Substring(fullRoot.Length)
+                .TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string[] parts = relative.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0)
+                return rootName;
+            return rootName + "  /  " + string.Join("  /  ", parts);
+        }
+        catch (Exception)
+        {
+            return directory;
+        }
+    }
+
     public static bool IsInsideRoot(string root, string path)
     {
         try

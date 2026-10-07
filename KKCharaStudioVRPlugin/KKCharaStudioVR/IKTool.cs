@@ -3,6 +3,8 @@ using System.Collections;
 using System.Collections.Generic;
 using Studio;
 using UnityEngine;
+using UnityEngine.SceneManagement;
+using VRGIN.Core;
 using Object = UnityEngine.Object;
 
 namespace KKCharaStudioVR;
@@ -50,15 +52,33 @@ public class IKTool : MonoBehaviour
 		StartWatch();
 	}
 
-	private HashSet<int> processedObjectKeys = new HashSet<int>();
+	private bool _missingSphereLogged;
+	private bool _installFailureLogged;
+
+	private void OnEnable()
+	{
+		SceneManager.sceneLoaded += OnSceneLoaded;
+	}
+
+	private void OnDisable()
+	{
+		SceneManager.sceneLoaded -= OnSceneLoaded;
+	}
+
+	private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
+	{
+		StartWatch();
+	}
 
 	private IEnumerator InstallMoveableObjectCo()
 	{
-		Studio.Studio studio = Singleton<Studio.Studio>.Instance;
 		_ = Singleton<GuideObjectManager>.Instance;
 		while (true)
 		{
 			yield return (object)new WaitForSeconds(1f);
+			Studio.Studio studio = Singleton<Studio.Studio>.Instance;
+			if (studio == null || studio.dicObjectCtrl == null)
+				continue;
 			try
 			{
 				var enumerator = studio.dicObjectCtrl.GetEnumerator();
@@ -68,41 +88,42 @@ public class IKTool : MonoBehaviour
 					int key = item.Key;
 					ObjectCtrlInfo value = item.Value;
 
-					if (processedObjectKeys.Contains(key))
-					{
-						continue;
-					}
-
+					// Do not remember the character key. IK and FK lists are often
+					// still empty the first time a character is seen; marking it
+					// done then leaves every bone without a grab marker.
 					if (value == null || value.guideObject == null || ((Component)value.guideObject).gameObject == null)
-					{
 						continue;
-					}
 
-					MakeObjectMoveable(value.guideObject, replaceMaterial: true, installToCenter: true);
-					processedObjectKeys.Add(key);
-
-					if (value is OCIChar val)
+					try
 					{
-						if (val.listIKTarget != null)
+						MakeObjectMoveable(value.guideObject, replaceMaterial: true, installToCenter: true);
+						if (value is OCIChar val)
 						{
-							foreach (OCIChar.IKInfo item2 in val.listIKTarget)
+							if (val.listIKTarget != null)
 							{
-								if (item2 != null && item2.guideObject != null)
+								foreach (OCIChar.IKInfo item2 in val.listIKTarget)
 								{
-									MakeObjectMoveable(item2.guideObject, replaceMaterial: true);
+									if (item2 != null && item2.guideObject != null)
+										MakeObjectMoveable(item2.guideObject, replaceMaterial: true);
+								}
+							}
+
+							if (val.listBones != null)
+							{
+								foreach (OCIChar.BoneInfo listBone in val.listBones)
+								{
+									if (listBone != null && listBone.guideObject != null)
+										MakeObjectMoveable(listBone.guideObject, replaceMaterial: true);
 								}
 							}
 						}
-
-						if (val.listBones != null)
+					}
+					catch (Exception ex)
+					{
+						if (!_installFailureLogged)
 						{
-							foreach (OCIChar.BoneInfo listBone in val.listBones)
-							{
-								if (listBone != null && listBone.guideObject != null)
-								{
-									MakeObjectMoveable(listBone.guideObject, replaceMaterial: true);
-								}
-							}
+							_installFailureLogged = true;
+							VRLog.Warn("IK grab marker install failed for object " + key + " and will retry: " + ex);
 						}
 					}
 				}
@@ -110,14 +131,13 @@ public class IKTool : MonoBehaviour
 			}
 			catch (Exception value2)
 			{
-				Console.WriteLine(value2);
+				if (!_installFailureLogged)
+				{
+					_installFailureLogged = true;
+					VRLog.Warn("IK grab marker scan failed: " + value2);
+				}
 			}
 		}
-	}
-
-	private void OnLevelWasLoaded(int level)
-	{
-		StartWatch();
 	}
 
 	private void StartWatch()
@@ -125,7 +145,6 @@ public class IKTool : MonoBehaviour
 		//IL_0027: Unknown result type (might be due to invalid IL or missing references)
 		//IL_0031: Expected O, but got Unknown
 		((MonoBehaviour)this).StopAllCoroutines();
-		processedObjectKeys.Clear();
 		((MonoBehaviour)this).StartCoroutine(InstallMoveableObjectCo());
 		if (handle == null)
 		{
@@ -136,22 +155,28 @@ public class IKTool : MonoBehaviour
 
 	private void MakeObjectMoveable(GuideObject guideObject, bool replaceMaterial = false, bool installToCenter = false)
 	{
-		if (!(guideObject.transformTarget == null))
+		if (guideObject == null || guideObject.transformTarget == null)
+			return;
+		GameObject host = ((Component)guideObject).gameObject;
+		if (!installToCenter)
 		{
-			if (installToCenter)
+			Transform sphere = host.transform.Find("Sphere");
+			if (sphere == null)
 			{
-				InstallGripMoveMarker(((Component)guideObject).gameObject, OnObjectMove, guideObject, replaceMaterial, installToCenter);
+				if (!_missingSphereLogged)
+				{
+					_missingSphereLogged = true;
+					VRLog.Warn("IK guide '" + host.name + "' has no Sphere child. The grab marker is attached to the guide root.");
+				}
 			}
 			else
 			{
-				GameObject gameObject = ((Component)((Component)guideObject).gameObject.transform.Find("Sphere")).gameObject;
-				InstallGripMoveMarker(gameObject, OnObjectMove, guideObject, replaceMaterial, installToCenter);
-			}
-			if (guideObject.enableScale)
-			{
-				InstallScaleMoveMarker(guideObject);
+				host = ((Component)sphere).gameObject;
 			}
 		}
+		InstallGripMoveMarker(host, OnObjectMove, guideObject, replaceMaterial, installToCenter);
+		if (guideObject.enableScale)
+			InstallScaleMoveMarker(guideObject);
 	}
 
 	private bool InstallGripMoveMarker(GameObject target, Action<MonoBehaviour> moveHandler, GuideObject guideObject, bool replaceMaterial, bool installToCenter)
@@ -166,7 +191,14 @@ public class IKTool : MonoBehaviour
 		//IL_0174: Unknown result type (might be due to invalid IL or missing references)
 		//IL_00ed: Unknown result type (might be due to invalid IL or missing references)
 		//IL_00f4: Expected O, but got Unknown
-		if (target.transform.Find("_gripmovemarker") == null)
+		Transform existingMarker = target.transform.Find("_gripmovemarker");
+		if (existingMarker != null)
+		{
+			MoveableGUIObject existing = existingMarker.GetComponent<MoveableGUIObject>();
+			if (existing != null && existing.guideObject == null)
+				existing.guideObject = guideObject;
+			return false;
+		}
 		{
 			Renderer visibleReference = null;
 			GameObject val;
@@ -221,7 +253,6 @@ public class IKTool : MonoBehaviour
 			}
 			return true;
 		}
-		return false;
 	}
 
 	private bool InstallScaleMoveMarker(GuideObject guideObject)
@@ -233,12 +264,14 @@ public class IKTool : MonoBehaviour
 		//IL_0149: Unknown result type (might be due to invalid IL or missing references)
 		//IL_0158: Unknown result type (might be due to invalid IL or missing references)
 		Transform val = ((Component)guideObject).gameObject.transform.Find("scale");
-		if (((Component)val).transform.Find("X/_gripmovemarker_scale") == null)
+		if (val != null && val.Find("X/_gripmovemarker_scale") == null)
 		{
 			string[] array = new string[4] { "XYZ", "X", "Y", "Z" };
 			foreach (string text in array)
 			{
 				Transform val2 = val.Find(text);
+				if (val2 == null)
+					continue;
 				GuideScale component = ((Component)val2).gameObject.GetComponent<GuideScale>();
 				if (component != null)
 				{
@@ -305,23 +338,85 @@ public class IKTool : MonoBehaviour
 		//IL_007f: Unknown result type (might be due to invalid IL or missing references)
 		//IL_00a8: Unknown result type (might be due to invalid IL or missing references)
 		//IL_00be: Unknown result type (might be due to invalid IL or missing references)
+		if (marker == null) return;
 		MoveableGUIObject component = ((Component)marker).GetComponent<MoveableGUIObject>();
+		if (component == null || component.guideObject == null) return;
 		Transform parent = ((Component)marker).transform.parent;
 		GuideObject guideObject = component.guideObject;
+		Transform bone = guideObject.transformTarget;
 		pos &= guideObject.enablePos;
 		rotation &= guideObject.enableRot;
-		if (pos)
+		// Without an active IK/FK chain the Animator re-evaluates the limb and the
+		// bone snaps back to the clip on the very next frame.
+		VRIkPosing.EnsureChainActive(guideObject);
+		if (pos && bone != null && parent != null && IsFinite(((Component)marker).transform.position))
 		{
-			target.position += ((Component)marker).transform.position - ((Component)parent).transform.position;
-			((Component)guideObject.transformTarget).transform.position = target.position;
-			guideObject.changeAmount.pos = guideObject.transformTarget.localPosition;
+			// The guide sphere is sometimes parented under the bone. Moving that
+			// parent and then assigning the bone applies the same delta twice
+			// and the limb jumps.
+			bool coupled = parent == bone || parent.IsChildOf(bone);
+			Vector3 desired = ((Component)marker).transform.position;
+			if (!coupled)
+			{
+				Vector3 delta = ((Component)marker).transform.position - parent.position;
+				if (IsFinite(delta))
+				{
+					target.position += delta;
+					desired = target.position;
+				}
+			}
+			if (IsFinite(desired))
+			{
+				Vector3 backup = bone.position;
+				bone.position = desired;
+				Vector3 local = bone.localPosition;
+				if (IsFinite(local) && local.sqrMagnitude < 10000f)
+					guideObject.changeAmount.pos = local;
+				else
+					bone.position = backup;
+			}
 		}
-		((Component)marker).transform.localPosition = Vector3.zero;
-		if (rotation)
+		if (parent != null)
+			((Component)marker).transform.localPosition = Vector3.zero;
+		if (rotation && bone != null && IsFinite(((Component)marker).transform.rotation))
 		{
-			guideObject.transformTarget.rotation = ((Component)marker).transform.rotation;
-			guideObject.changeAmount.rot = guideObject.transformTarget.localEulerAngles;
+			bone.rotation = ((Component)marker).transform.rotation;
+			Vector3 euler = bone.localEulerAngles;
+			if (IsFinite(euler))
+			{
+				// localEulerAngles is 0..360. Writing that straight into
+				// changeAmount.rot spins the bone a full turn whenever the
+				// stored angle was negative.
+				guideObject.changeAmount.rot = UnwrapEuler(guideObject.changeAmount.rot, euler);
+			}
 		}
+		if (pos || rotation)
+			VRIkPosing.Commit(guideObject);
+	}
+
+	private static bool IsFinite(Vector3 value)
+	{
+		return !float.IsNaN(value.x) && !float.IsInfinity(value.x)
+			&& !float.IsNaN(value.y) && !float.IsInfinity(value.y)
+			&& !float.IsNaN(value.z) && !float.IsInfinity(value.z);
+	}
+
+	private static bool IsFinite(Quaternion value)
+	{
+		if (!IsFinite(new Vector3(value.x, value.y, value.z))
+			|| float.IsNaN(value.w) || float.IsInfinity(value.w))
+			return false;
+		float mag = value.x * value.x + value.y * value.y + value.z * value.z + value.w * value.w;
+		return mag > 0.0001f && mag < 4f;
+	}
+
+	private static Vector3 UnwrapEuler(Vector3 previous, Vector3 current)
+	{
+		if (!IsFinite(previous)) return current;
+		current.x = previous.x + Mathf.DeltaAngle(previous.x, current.x);
+		current.y = previous.y + Mathf.DeltaAngle(previous.y, current.y);
+		current.z = previous.z + Mathf.DeltaAngle(previous.z, current.z);
+		return current;
 	}
 
 	private void OnScaleMove(MonoBehaviour marker)

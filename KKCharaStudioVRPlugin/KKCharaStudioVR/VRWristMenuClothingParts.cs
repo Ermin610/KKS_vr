@@ -202,12 +202,21 @@ public sealed partial class VRWristMenuController
     {
         if (_page != WristMenuPage.Clothing || _menuRect == null)
             return false;
-        Vector3 local = _menuRect.InverseTransformPoint(point);
-        float logicalY = -local.y;
-        return local.x >= 0f
-            && local.x <= MenuWidth
-            && logicalY >= ClothingScrollViewportTop
-            && logicalY <= ClothingScrollViewportTop + ClothingScrollViewportHeight;
+        return IsInsideClothingViewportRect(point);
+    }
+
+    private bool IsInsideClothingViewportRect(Vector3 worldPoint)
+    {
+        Vector3 local = _menuRect.InverseTransformPoint(worldPoint);
+        Rect rect = _menuRect.rect;
+        return VRWristMenuHitPolicy.InsideViewport(
+            local.x,
+            local.y,
+            rect.xMin,
+            rect.yMax,
+            MenuWidth,
+            ClothingScrollViewportTop,
+            ClothingScrollViewportHeight);
     }
 
     private void SetClothingScrollOffset(float offset)
@@ -237,16 +246,14 @@ public sealed partial class VRWristMenuController
     {
         if (_page != WristMenuPage.Clothing
             || candidate == null
+            || _menuRect == null
             || _clothingScrollContent == null
             || !candidate.transform.IsChildOf(_clothingScrollContent))
         {
             return true;
         }
 
-        Vector3 local = _menuRect.InverseTransformPoint(hitPoint);
-        float logicalY = -local.y;
-        return logicalY >= ClothingScrollViewportTop
-            && logicalY <= ClothingScrollViewportTop + ClothingScrollViewportHeight;
+        return IsInsideClothingViewportRect(hitPoint);
     }
 
     private void HandleOpenClothingParts()

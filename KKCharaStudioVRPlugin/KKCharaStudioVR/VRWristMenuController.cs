@@ -46,7 +46,10 @@ public sealed partial class VRWristMenuController : MonoBehaviour
         MmdCuePresets,
         MmdClearConfirm,
         HighHeels,
-        Settings
+        MmdDance,
+        Settings,
+        Ik,
+        FigureScale
     }
 
     public static VRWristMenuController Instance { get; private set; }
@@ -96,6 +99,9 @@ public sealed partial class VRWristMenuController : MonoBehaviour
     private bool _menuPressChorded;
     private bool _poseInitialized;
     private float _menuPressStarted;
+    private string _lastEnsureFailure;
+    private string _lastPointerFailure;
+    private bool _loggedRenderState;
     private float _statusUntil;
     private float _nextClothingRefresh;
     private float _trackingUnavailableSince = -1f;
@@ -113,6 +119,8 @@ public sealed partial class VRWristMenuController : MonoBehaviour
         ResolveSettings();
         if (_presentationSuppressed)
         {
+            _menuPressActive = false;
+            NoteMenuButtonBlocked("presentation suppressed");
             if (_menuRoot != null && _menuRoot.activeSelf)
                 _menuRoot.SetActive(false);
             SetPointerVisible(false);
@@ -123,14 +131,15 @@ public sealed partial class VRWristMenuController : MonoBehaviour
         if (_settings != null && !_settings.WristMenuEnabled)
         {
             if (_isOpen)
-                SetOpen(false);
+                SetOpen(false, "WristMenuEnabled is false");
             return;
         }
 
         if (!_isOpen)
             return;
 
-        if (!HasTrackedMenuControllers())
+        string trackingReason;
+        if (!HasTrackedMenuControllers(out trackingReason))
         {
             SetHoveredButton(null);
             SetPointerVisible(false);
@@ -138,8 +147,7 @@ public sealed partial class VRWristMenuController : MonoBehaviour
                 _trackingUnavailableSince = Time.unscaledTime;
             else if (Time.unscaledTime - _trackingUnavailableSince >= TrackingLossCloseDelay)
             {
-                VRLog.Warn("Wrist menu closed after controller tracking was lost.");
-                SetOpen(false);
+                SetOpen(false, "controllers unavailable (" + trackingReason + ")");
             }
             return;
         }
@@ -147,10 +155,11 @@ public sealed partial class VRWristMenuController : MonoBehaviour
 
         if (!EnsureMenu())
         {
-            SetOpen(false);
+            SetOpen(false, _lastEnsureFailure ?? "EnsureMenu failed");
             return;
         }
 
+        EnsureHeadsetCanSeeMenu();
         UpdatePose();
         UpdateTransientState();
         UpdatePointer();
@@ -182,6 +191,12 @@ public sealed partial class VRWristMenuController : MonoBehaviour
         if (_ownsEmphasizedFont && _emphasizedFont != null && _emphasizedFont != _font)
             Destroy(_emphasizedFont);
         ReleaseCharacterPreviewTexture();
+        if (_cardThumbnailCache != null)
+        {
+            _cardThumbnailCache.Clear();
+            _cardThumbnailCache = null;
+        }
+        VRCardThumbnailDiskCache.Flush();
         if (Instance == this)
             Instance = null;
     }
@@ -197,15 +212,32 @@ public sealed partial class VRWristMenuController : MonoBehaviour
             _settings = VR.Manager.Context.Settings as KKCharaStudioVRSettings;
     }
 
-    private void HandleMenuButton()
+    private void NoteMenuButtonBlocked(string reason)
     {
-        // While open, accept the configured primary face button even if positional tracking is temporarily invalid so
-        // the menu can always release its input lock.
+        SteamVR_Controller.Device menuDevice = MenuDevice(false);
+        if (menuDevice != null && menuDevice.GetPressDown(EVRButtonId.k_EButton_A))
+            VRLog.Info("Wrist menu toggle skipped: " + reason + " (" + MenuHandLabel() + " k_EButton_A)");
+    }
+
+    private string MenuHandLabel()
+    {
         bool useRightHand = _settings != null
             && _settings.ControllerFaceButtonLayout == KKCharaStudioVRSettings.ControllerLayoutRightHand;
-        SteamVR_Controller.Device menuDevice = GetDevice(
-            useRightHand ? VR.Mode?.Right : VR.Mode?.Left,
-            !_isOpen);
+        return useRightHand ? "right A" : "left X";
+    }
+
+    private SteamVR_Controller.Device MenuDevice(bool requireTracking)
+    {
+        bool useRightHand = _settings != null
+            && _settings.ControllerFaceButtonLayout == KKCharaStudioVRSettings.ControllerLayoutRightHand;
+        return GetDevice(useRightHand ? VR.Mode?.Right : VR.Mode?.Left, requireTracking);
+    }
+
+    private void HandleMenuButton()
+    {
+        // Button edges must not depend on pose.isValid. OpenXR can report a
+        // connected controller whose pose flag flickers while X/A still updates.
+        SteamVR_Controller.Device menuDevice = MenuDevice(false);
         if (menuDevice == null)
         {
             _menuPressActive = false;
@@ -219,23 +251,40 @@ public sealed partial class VRWristMenuController : MonoBehaviour
             _menuPressStarted = Time.unscaledTime;
         }
 
-        if (_menuPressActive && menuDevice.GetPress(EVRButtonId.k_EButton_A))
+        if (_menuPressActive)
         {
             _menuPressChorded |= menuDevice.GetPress(EVRButtonId.k_EButton_Grip)
                 || menuDevice.GetPress(EVRButtonId.k_EButton_Axis1);
         }
 
-        if (!_menuPressActive || !menuDevice.GetPressUp(EVRButtonId.k_EButton_A))
+        // A tracked press that is no longer held counts when the press-up edge is dropped.
+        bool released = _menuPressActive
+            && (menuDevice.GetPressUp(EVRButtonId.k_EButton_A) || !menuDevice.GetPress(EVRButtonId.k_EButton_A));
+        if (!released)
             return;
 
         float duration = Time.unscaledTime - _menuPressStarted;
+        bool chorded = _menuPressChorded;
         _menuPressActive = false;
-        if (!_menuPressChorded && duration <= MenuPressMaxDuration
-            && (_settings == null || _settings.WristMenuEnabled))
+        string hand = MenuHandLabel();
+        if (chorded)
         {
-            ToggleMenu();
-            menuDevice.TriggerHapticPulse(500, EVRButtonId.k_EButton_Axis0);
+            VRLog.Info("Wrist menu toggle skipped: grip/trigger chord (" + hand + ")");
+            return;
         }
+        if (duration > MenuPressMaxDuration)
+        {
+            VRLog.Info("Wrist menu toggle skipped: held " + duration.ToString("0.00") + "s (" + hand + ")");
+            return;
+        }
+        if (_settings != null && !_settings.WristMenuEnabled)
+        {
+            VRLog.Info("Wrist menu toggle skipped: WristMenuEnabled is false (" + hand + ")");
+            return;
+        }
+
+        ToggleMenu();
+        menuDevice.TriggerHapticPulse(500, EVRButtonId.k_EButton_Axis0);
     }
 
     internal void SetPresentationSuppressed(bool suppressed)
@@ -250,7 +299,7 @@ public sealed partial class VRWristMenuController : MonoBehaviour
             _menuRoot.SetActive(!suppressed && _isOpen);
     }
 
-    private void SetOpen(bool open)
+    private void SetOpen(bool open, string detail = null)
     {
         if (open && (!EnsureMenu() || !EnsurePointer()))
         {
@@ -258,9 +307,13 @@ public sealed partial class VRWristMenuController : MonoBehaviour
             SetPointerVisible(false);
             if (_menuRoot != null)
                 _menuRoot.SetActive(false);
-            VRLog.Error("Wrist menu stayed closed because its controller pointer could not initialize.");
+            VRLog.Info("Wrist menu toggle failed: "
+                + (_lastEnsureFailure ?? _lastPointerFailure ?? "pointer init failed"));
             return;
         }
+
+        if (_isOpen == open)
+            return;
 
         _isOpen = open;
         _poseInitialized = false;
@@ -272,6 +325,7 @@ public sealed partial class VRWristMenuController : MonoBehaviour
             _menuRoot.SetActive(open);
         if (open)
         {
+            EnsureHeadsetCanSeeMenu();
             if (_operationInProgress)
             {
                 SetStatus(
@@ -287,17 +341,25 @@ public sealed partial class VRWristMenuController : MonoBehaviour
                 ShowPage(_lastStablePage);
                 SetStatus(L("就绪", "準備完了", "Ready"), new Color(0.78f, 0.86f, 0.9f, 1f), 0f);
             }
+            VRLog.Info("Wrist menu opened.");
         }
-
-        VRLog.Info("Wrist menu " + (open ? "opened." : "closed."));
+        else
+        {
+            EndFigureScaleSliderDrag();
+            VRLog.Info("Wrist menu closed" + (string.IsNullOrEmpty(detail) ? "." : ": " + detail));
+        }
     }
 
     private bool EnsureMenu()
     {
+        _lastEnsureFailure = null;
         if (_menuRoot != null)
             return true;
-        if (VR.Mode == null || VR.Mode.Left == null || VR.Camera == null || VR.Camera.Head == null)
+        if (VR.Mode == null || VR.Mode.Left == null)
+        {
+            _lastEnsureFailure = VR.Mode == null ? "VR.Mode is null" : "left controller is null";
             return false;
+        }
 
         _visibleLayer = LayerMask.NameToLayer(VR.Context.GuiLayer);
         if (_visibleLayer < 0)
@@ -323,8 +385,9 @@ public sealed partial class VRWristMenuController : MonoBehaviour
         canvas.renderMode = RenderMode.WorldSpace;
         canvas.overrideSorting = true;
         canvas.sortingOrder = 30000;
-        if (VR.Camera.SteamCam != null)
-            canvas.worldCamera = VR.Camera.SteamCam.camera;
+        Camera headset = HeadsetCamera();
+        if (headset != null && headset.targetTexture == null)
+            canvas.worldCamera = headset;
 
         CanvasScaler scaler = _menuRoot.GetComponent<CanvasScaler>();
         scaler.dynamicPixelsPerUnit = 10f;
@@ -371,7 +434,10 @@ public sealed partial class VRWristMenuController : MonoBehaviour
         _mmdPresetPage = CreateRectObject("MmdPresetPage", _menuRect, 0f, 0f, MenuWidth, MenuHeight, _visibleLayer);
         _mmdClearConfirmPage = CreateRectObject("MmdClearConfirmPage", _menuRect, 0f, 0f, MenuWidth, MenuHeight, _visibleLayer);
         _highHeelsPage = CreateRectObject("HighHeelsPage", _menuRect, 0f, 0f, MenuWidth, MenuHeight, _visibleLayer);
+        _mmdDancePage = CreateRectObject("MmdDancePage", _menuRect, 0f, 0f, MenuWidth, MenuHeight, _visibleLayer);
         _settingsPage = CreateRectObject("SettingsPage", _menuRect, 0f, 0f, MenuWidth, MenuHeight, _visibleLayer);
+        _ikPage = CreateRectObject("IkPage", _menuRect, 0f, 0f, MenuWidth, MenuHeight, _visibleLayer);
+        _figureScalePage = CreateRectObject("FigureScalePage", _menuRect, 0f, 0f, MenuWidth, MenuHeight, _visibleLayer);
 
         CreateText("Title", _rootPage.transform, "KK VR", 24f, 7f, 220f, 31f, 28,
             TextAnchor.MiddleLeft, PrimaryTextColor);
@@ -484,13 +550,13 @@ public sealed partial class VRWristMenuController : MonoBehaviour
             62f,
             17);
         CreateButton(
-            "ToggleIkVisibility",
-            L("IK 控制器\n显示或隐藏辅助点", "IK コントローラー\n補助点を表示・非表示", "IK controllers\nShow or hide helper points"),
+            "OpenIk",
+            L("IK 互动  ›\n绿球、触感与定型", "IK インタラクト  ›\nガイド・触感・固定", "IK interact  ›\nGuides, touch, and posing"),
             376f,
             320f,
             new Color(0.075f, 0.24f, 0.14f, 0.48f),
             new Color(0.11f, 0.46f, 0.24f, 0.76f),
-            HandleToggleIkVisibility,
+            HandleOpenIkPage,
             _rootPage.transform,
             160f,
             62f,
@@ -513,8 +579,11 @@ public sealed partial class VRWristMenuController : MonoBehaviour
         BuildMmdCuePage();
         BuildMmdPresetPage();
         BuildMmdClearConfirmPage();
+        BuildMmdDancePage();
         BuildHighHeelsPage();
         BuildSettingsPage();
+        BuildIkPage();
+        BuildFigureScalePage();
 
         Image statusBackground = CreateImage("StatusBackground", _menuRect, 24f, 416f, 512f, 58f, GlassSurfaceColor);
         ApplyGlassEffects(statusBackground, new Color(0.82f, 0.9f, 1f, 0.1f), true, 2f);
@@ -553,9 +622,83 @@ public sealed partial class VRWristMenuController : MonoBehaviour
         _mmdClearConfirmPage.SetActive(false);
         _highHeelsPage.SetActive(false);
         _settingsPage.SetActive(false);
+        _ikPage.SetActive(false);
+        _figureScalePage.SetActive(false);
         _menuRoot.SetActive(false);
         RefreshTimelineButton();
+        EnsureHeadsetCanSeeMenu();
         return true;
+    }
+
+    private static Transform HeadsetHead()
+    {
+        try
+        {
+            if (VR.Camera == null)
+                return null;
+            Transform head = VR.Camera.Head;
+            if (head != null)
+                return head;
+            Camera camera = HeadsetCamera();
+            return camera != null ? camera.transform : ((Component)VR.Camera).transform;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private static Camera HeadsetCamera()
+    {
+        try
+        {
+            if (VR.Camera == null || VR.Camera.SteamCam == null)
+                return null;
+            return VR.Camera.SteamCam.camera;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private void EnsureHeadsetCanSeeMenu()
+    {
+        if (_menuRoot == null || _visibleLayer < 0)
+            return;
+
+        Camera headset = HeadsetCamera();
+        int mask = headset != null ? headset.cullingMask : 0;
+        bool seen = headset != null && (mask & (1 << _visibleLayer)) != 0;
+        if (headset != null && !seen)
+        {
+            headset.cullingMask |= 1 << _visibleLayer;
+            seen = true;
+            mask = headset.cullingMask;
+            VRLog.Warn("Wrist menu layer " + LayerMask.LayerToName(_visibleLayer)
+                + " was outside the headset culling mask; added it.");
+        }
+
+        Canvas canvas = _menuRoot.GetComponent<Canvas>();
+        if (canvas != null)
+        {
+            if (canvas.renderMode != RenderMode.WorldSpace)
+            {
+                VRLog.Warn("Wrist menu canvas left World Space; restoring it.");
+                canvas.renderMode = RenderMode.WorldSpace;
+            }
+            if (headset != null && headset.targetTexture == null)
+                canvas.worldCamera = headset;
+        }
+
+        if (!_loggedRenderState)
+        {
+            _loggedRenderState = true;
+            VRLog.Info("Wrist menu render layer=" + LayerMask.LayerToName(_visibleLayer)
+                + " (" + _visibleLayer + "), colliderLayer=" + LayerMask.LayerToName(_colliderLayer)
+                + " (" + _colliderLayer + "), headsetSeesLayer=" + seen
+                + ", mask=0x" + mask.ToString("X"));
+        }
     }
 
     private void BuildClothingPage()
@@ -931,10 +1074,14 @@ public sealed partial class VRWristMenuController : MonoBehaviour
     private void UpdatePose()
     {
         Transform left = ((Component)VR.Mode.Left).transform;
-        Transform head = VR.Camera.Head;
+        Transform head = HeadsetHead();
+        Vector3 up = head != null ? head.up : Vector3.up;
+        Vector3 forward = head != null ? head.forward : left.forward;
+        if (forward.sqrMagnitude < 0.001f)
+            forward = Vector3.forward;
         float configuredScale = _settings != null ? Mathf.Clamp(_settings.WristMenuScale, 0.7f, 1.5f) : 1f;
-        Vector3 targetPosition = left.position + head.up * 0.105f + head.forward * 0.035f;
-        Quaternion targetRotation = Quaternion.LookRotation(head.forward, head.up);
+        Vector3 targetPosition = left.position + up * 0.105f + forward * 0.035f;
+        Quaternion targetRotation = Quaternion.LookRotation(forward, up);
 
         _menuRect.localScale = Vector3.one * (BaseMenuScale * configuredScale);
         if (!_poseInitialized)
@@ -952,7 +1099,7 @@ public sealed partial class VRWristMenuController : MonoBehaviour
 
     private void UpdatePointer()
     {
-        SteamVR_Controller.Device rightDevice = GetDevice(VR.Mode?.Right);
+        SteamVR_Controller.Device rightDevice = GetDevice(VR.Mode?.Right, false);
         if (rightDevice == null)
         {
             SetHoveredButton(null);
@@ -961,8 +1108,7 @@ public sealed partial class VRWristMenuController : MonoBehaviour
         }
         if (!EnsurePointer())
         {
-            VRLog.Error("Wrist menu closed after its controller pointer became unavailable.");
-            SetOpen(false);
+            SetOpen(false, _lastPointerFailure ?? "pointer unavailable");
             return;
         }
 
@@ -986,6 +1132,8 @@ public sealed partial class VRWristMenuController : MonoBehaviour
             rightDevice,
             hasMenuSurfaceHit && IsPointInsideClothingScrollViewport(menuSurfacePoint));
 
+        // Moved UI colliders are stale until the physics scene copies transforms.
+        Physics.SyncTransforms();
         RaycastHit[] hits = Physics.RaycastAll(
             pointerRay,
             2f,
@@ -1006,8 +1154,16 @@ public sealed partial class VRWristMenuController : MonoBehaviour
             }
         }
 
-        if (target != _hoveredButton && target != null)
-            rightDevice.TriggerHapticPulse(140, EVRButtonId.k_EButton_Axis0);
+        if (target == null && hasMenuSurfaceHit)
+        {
+            VRWristMenuButtonTarget rectTarget = FindButtonAtMenuPoint(menuSurfacePoint);
+            if (rectTarget != null)
+            {
+                target = rectTarget;
+                end = menuSurfacePoint;
+            }
+        }
+
         SetHoveredButton(target);
         SetPointerVisible(true);
 
@@ -1022,9 +1178,11 @@ public sealed partial class VRWristMenuController : MonoBehaviour
             hasMenuSurfaceHit ? menuSurfacePoint : end,
             pointerColor);
 
+        if (UpdateFigureScaleSliderDrag(rightDevice, target, hasMenuSurfaceHit, menuSurfacePoint))
+            return;
+
         if (target != null && rightDevice.GetPressDown(EVRButtonId.k_EButton_Axis1))
         {
-            rightDevice.TriggerHapticPulse(800, EVRButtonId.k_EButton_Axis0);
             if (_operationInProgress)
             {
                 SetStatus(
@@ -1040,10 +1198,37 @@ public sealed partial class VRWristMenuController : MonoBehaviour
         }
     }
 
+    private VRWristMenuButtonTarget FindButtonAtMenuPoint(Vector3 worldPoint)
+    {
+        if (_menuRoot == null)
+            return null;
+        VRWristMenuButtonTarget match = null;
+        VRWristMenuButtonTarget[] buttons = _menuRoot.GetComponentsInChildren<VRWristMenuButtonTarget>(false);
+        foreach (VRWristMenuButtonTarget candidate in buttons)
+        {
+            if (candidate == null || !candidate.IsInteractable || !candidate.gameObject.activeInHierarchy)
+                continue;
+            RectTransform rect = candidate.transform.parent as RectTransform;
+            if (rect == null)
+                continue;
+            Vector3 local = rect.InverseTransformPoint(worldPoint);
+            if (!rect.rect.Contains(new Vector2(local.x, local.y)))
+                continue;
+            if (!IsMenuButtonHitVisible(candidate, worldPoint))
+                continue;
+            match = candidate;
+        }
+        return match;
+    }
+
     private bool EnsurePointer()
     {
+        _lastPointerFailure = null;
         if (VR.Mode == null || VR.Mode.Right == null)
+        {
+            _lastPointerFailure = VR.Mode == null ? "VR.Mode is null" : "right controller is null";
             return false;
+        }
 
         Transform right = ((Component)VR.Mode.Right).transform;
         if (_laser == null)
@@ -1066,6 +1251,7 @@ public sealed partial class VRWristMenuController : MonoBehaviour
             }
             catch (Exception ex)
             {
+                _lastPointerFailure = ex.Message;
                 VRLog.Error("Failed to initialize wrist pointer: " + ex.Message);
                 DestroyPointerVisuals();
                 return false;
@@ -1073,7 +1259,10 @@ public sealed partial class VRWristMenuController : MonoBehaviour
         }
 
         if (!EnsureSurfaceCursor())
+        {
+            _lastPointerFailure = "surface cursor failed";
             return false;
+        }
 
         if (_rightTransform != right)
         {
@@ -1246,8 +1435,16 @@ public sealed partial class VRWristMenuController : MonoBehaviour
             _mmdClearConfirmPage.SetActive(page == WristMenuPage.MmdClearConfirm);
         if (_highHeelsPage != null)
             _highHeelsPage.SetActive(page == WristMenuPage.HighHeels);
+        if (_mmdDancePage != null)
+            _mmdDancePage.SetActive(page == WristMenuPage.MmdDance);
         if (_settingsPage != null)
             _settingsPage.SetActive(page == WristMenuPage.Settings);
+        if (_ikPage != null)
+            _ikPage.SetActive(page == WristMenuPage.Ik);
+        if (_figureScalePage != null)
+            _figureScalePage.SetActive(page == WristMenuPage.FigureScale);
+        if (page != WristMenuPage.FigureScale)
+            EndFigureScaleSliderDrag();
 
         if (page == WristMenuPage.Root)
         {
@@ -1319,6 +1516,15 @@ public sealed partial class VRWristMenuController : MonoBehaviour
         {
             RefreshSettingsPage();
         }
+        else if (page == WristMenuPage.Ik)
+        {
+            RefreshIkPage();
+        }
+        else if (page == WristMenuPage.FigureScale)
+        {
+            RefreshFigureScalePage();
+            _nextFigureScaleRefresh = Time.unscaledTime + 0.2f;
+        }
     }
 
     private static bool IsStablePage(WristMenuPage page)
@@ -1335,8 +1541,11 @@ public sealed partial class VRWristMenuController : MonoBehaviour
             || page == WristMenuPage.MmdCamera
             || page == WristMenuPage.MmdCues
             || page == WristMenuPage.MmdCuePresets
+            || page == WristMenuPage.MmdDance
             || page == WristMenuPage.HighHeels
-            || page == WristMenuPage.Settings;
+            || page == WristMenuPage.Settings
+            || page == WristMenuPage.Ik
+            || page == WristMenuPage.FigureScale;
     }
 
     private bool TryGetMenuSurfaceHit(
@@ -1466,6 +1675,20 @@ public sealed partial class VRWristMenuController : MonoBehaviour
         return false;
     }
 
+    private bool TryAdoptSelectedClothingTarget()
+    {
+        int[] selected = VRVmdTargetService.GetSelectedObjectKeys();
+        if (selected.Length != 1)
+            return false;
+        VRVmdActorTarget target;
+        string ignored;
+        if (!VRVmdTargetService.TryGetTarget(selected[0], out target, out ignored))
+            return false;
+        _clothingTargetObjectKey = target.ObjectKey;
+        _clothingTargetCharacter = target.Character;
+        return true;
+    }
+
     private void HandleToggleIkVisibility()
     {
         string status;
@@ -1479,6 +1702,7 @@ public sealed partial class VRWristMenuController : MonoBehaviour
         {
             success = VRQuickActions.Instance.ToggleIkControls(out status);
         }
+        RefreshIkPage();
         SetStatus(
             status,
             success ? new Color(0.35f, 1f, 0.62f, 1f) : new Color(1f, 0.38f, 0.34f, 1f),
@@ -1495,7 +1719,9 @@ public sealed partial class VRWristMenuController : MonoBehaviour
     {
         string status;
         Studio.OCIChar character;
-        bool hasTarget = TryGetClothingTarget(out character, out status);
+        bool hasTarget = TryGetClothingTarget(out character, out status)
+            || (TryAdoptSelectedClothingTarget()
+                && TryGetClothingTarget(out character, out status));
         bool success = hasTarget
             && VRCharacterClothingService.TrySetAll(_clothingTargetObjectKey, state, out status);
         if (success && VRMmdPlaybackController.Instance != null)
@@ -1622,6 +1848,7 @@ public sealed partial class VRWristMenuController : MonoBehaviour
             RefreshTimelinePage();
             _nextTimelineRefresh = Time.unscaledTime + 0.25f;
         }
+        UpdateFigureScalePage();
     }
 
     private void SetStatus(string message, Color color, float duration)
@@ -1635,10 +1862,20 @@ public sealed partial class VRWristMenuController : MonoBehaviour
         _statusUntil = duration > 0f ? Time.unscaledTime + duration : 0f;
     }
 
-    private bool HasTrackedMenuControllers()
+    private bool HasTrackedMenuControllers(out string reason)
     {
-        return GetDevice(VR.Mode?.Left, true) != null
-            && GetDevice(VR.Mode?.Right, true) != null;
+        // A connected device is enough. pose.isValid flickers on OpenXR and was
+        // closing the wrist menu even while the controller transform was live.
+        bool left = GetDevice(VR.Mode?.Left, false) != null;
+        bool right = GetDevice(VR.Mode?.Right, false) != null;
+        if (left && right)
+        {
+            reason = null;
+            return true;
+        }
+
+        reason = (left ? "" : "left missing") + (left || right ? "" : ", ") + (right ? "" : "right missing");
+        return false;
     }
 
     private static SteamVR_Controller.Device GetDevice(
@@ -1647,6 +1884,30 @@ public sealed partial class VRWristMenuController : MonoBehaviour
     {
         if (controller == null)
             return null;
+#if KKS
+        try
+        {
+            SteamVR_Controller.Device device = SteamVR_Controller.ForController(controller);
+            if (device == null || !device.connected)
+                return null;
+            if (!requireTracking)
+                return device;
+            if (controller.IsTracking || device.hasTracking)
+                return device;
+
+            Transform trackedTransform = ((Component)controller).transform;
+            bool hasFallbackPose = trackedTransform != null
+                && trackedTransform.localPosition.sqrMagnitude >= 0.000001f;
+            if (hasFallbackPose && !device.outOfRange && !device.calibrating && !device.uninitialized)
+                return device;
+            return null;
+        }
+        catch (Exception ex)
+        {
+            VRLog.Error("Unable to read controller state: " + ex.Message);
+            return null;
+        }
+#else
         SteamVR_TrackedObject tracked = ((Component)controller).GetComponent<SteamVR_TrackedObject>();
         if (tracked == null || tracked.index == SteamVR_TrackedObject.EIndex.None)
             return null;
@@ -1674,6 +1935,7 @@ public sealed partial class VRWristMenuController : MonoBehaviour
             VRLog.Error("Unable to read controller state: " + ex.Message);
             return null;
         }
+#endif
     }
 
     private Font ResolveFont(bool emphasized, out bool ownsFont)

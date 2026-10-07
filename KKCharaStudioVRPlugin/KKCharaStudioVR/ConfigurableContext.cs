@@ -76,7 +76,7 @@ public class ConfigurableContext : IVRManagerContext
 		IgnoreMask = 0;
 		InvisibleLayer = "Ignore Raycast";
 		PrimaryColor = Color.cyan;
-		SimulateCursor = true;
+		SimulateCursor = false;
 		UILayer = "UI";
 		UILayerMask = LayerMask.GetMask(new string[1] { UILayer });
 		UnitToMeter = 1f;

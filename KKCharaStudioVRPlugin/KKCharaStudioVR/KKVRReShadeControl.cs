@@ -30,9 +30,9 @@ public static class KKVRReShadeControl
     }
 
     /// <summary>
-    /// Rescans the top level of reshade-shaders and returns its current preset
-    /// names. Consumers can call this when reopening or explicitly refreshing
-    /// a menu; no Studio restart is required for file additions or removals.
+    /// Rescans reshade-presets and returns its current preset names. Consumers
+    /// can call this when reopening or explicitly refreshing a menu; no Studio
+    /// restart is required for file additions or removals.
     /// </summary>
     public static string[] RefreshPresetNames()
     {

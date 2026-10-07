@@ -40,13 +40,17 @@ public class VRCameraMoveHelper : MonoBehaviour
 
 	private string windowTitle = "";
 
+	private GUI.WindowFunction _windowGui;
+	private GUILayoutOption[] _noLayoutOptions;
+	private GUILayoutOption[] _buttonLayoutOptions;
+
 	private float DEFAULT_DISTANCE = 3f;
 
 	private float DISTANCE_RATIO = 1f;
 	private const float MainUIBaseScale = 0.8f;
-	public const float MinMainUIDistance = 0.3f;
+	public const float MinMainUIDistance = 0.2f;
 	public const float MaxMainUIDistance = 3.0f;
-	public const float MinMainUIScale = 0.6f;
+	public const float MinMainUIScale = 0.2f;
 	public const float MaxMainUIScale = 2.0f;
 
 	public static VRCameraMoveHelper Instance => _instance;
@@ -68,21 +72,35 @@ public class VRCameraMoveHelper : MonoBehaviour
 	{
 		VRLog.Info("StartupAlignCo: Waiting for game to initialize...");
 
-		// Wait a few seconds for SteamVR headset tracking to fully stabilize
-		yield return new WaitForSeconds(3.0f);
-
 		// Wait until the initial main scene loading is completely finished
 		var sceneManager = Singleton<Manager.Scene>.Instance;
 		if (sceneManager != null)
 		{
+			float loadingDeadline = Time.realtimeSinceStartup + 30f;
 			while (VRGameCompatibility.IsLoading)
 			{
+				if (Time.realtimeSinceStartup >= loadingDeadline)
+				{
+					VRLog.Warn("StartupAlignCo: timed out waiting for Manager.Scene loading flags.");
+					break;
+				}
 				yield return null;
 			}
 		}
 
-		// Wait an extra second to make sure VRGIN camera rigs are fully active and settled
-		yield return new WaitForSeconds(1.0f);
+		// Dynamically wait until VR headset tracking and camera rigs are active
+		float trackingDeadline = Time.realtimeSinceStartup + 5f;
+		while (Time.realtimeSinceStartup < trackingDeadline)
+		{
+			if (VR.Active && VR.Camera != null && VR.Camera.Head != null && VR.Camera.Head.position != Vector3.zero)
+			{
+				break;
+			}
+			yield return null;
+		}
+
+		// Brief settling pause (0.2s) for camera rig stabilization
+		yield return new WaitForSeconds(0.2f);
 
 		VRLog.Info("StartupAlignCo: Game initialized. Aligning VR camera and UI.");
 
@@ -90,8 +108,8 @@ public class VRCameraMoveHelper : MonoBehaviour
 		MoveToCurrent();
 
 		// Reposition the main floating studio UI quad directly in front of the player's eyes
-		float dist = 2.0f;
-		float scale = 1.0f;
+		float dist = KKCharaStudioVRSettings.DefaultUISpawnDistance;
+		float scale = KKCharaStudioVRSettings.DefaultUISpawnScale;
 		var settings = VR.Manager.Context.Settings as KKCharaStudioVRSettings;
 		if (settings != null)
 		{
@@ -103,7 +121,7 @@ public class VRCameraMoveHelper : MonoBehaviour
 
 	public static void RepositionMainUI(float dist)
 	{
-		float scale = 1.0f;
+		float scale = KKCharaStudioVRSettings.DefaultUISpawnScale;
 		if (VR.Manager != null && VR.Manager.Context != null)
 		{
 			KKCharaStudioVRSettings settings = VR.Manager.Context.Settings as KKCharaStudioVRSettings;
@@ -140,7 +158,7 @@ public class VRCameraMoveHelper : MonoBehaviour
 				if (ensureVisible)
 					((Component)internalGui).gameObject.SetActive(true);
 				((Component)internalGui).transform.position = head.TransformPoint(new Vector3(0f, 0f, dist));
-				((Component)internalGui).transform.rotation = Quaternion.LookRotation(head.TransformVector(new Vector3(0f, 0f, 1f)));
+				((Component)internalGui).transform.rotation = Quaternion.LookRotation(head.TransformVector(new Vector3(0f, 0f, 1f)), head.up);
 				((Component)internalGui).transform.localScale = GetMainUIScale(scaleMultiplier);
 				internalGui.UpdateAspect();
 				if (VRQuickActions.Instance != null)
@@ -207,7 +225,8 @@ public class VRCameraMoveHelper : MonoBehaviour
 			{
 				windowRect = new Rect((float)(Screen.width / 2), 60f * ((Transform)menuRect).lossyScale.y, 400f, 100f);
 			}
-			windowRect = GUI.Window(windowID, windowRect, new GUI.WindowFunction(FuncWindowGUI), windowTitle);
+			EnsureGuiCache();
+			windowRect = GUI.Window(windowID, windowRect, _windowGui, windowTitle);
 		}
 		finally
 		{
@@ -220,13 +239,10 @@ public class VRCameraMoveHelper : MonoBehaviour
 		try
 		{
 			GUI.enabled = true;
-			GUILayout.BeginVertical((GUILayoutOption[])(object)new GUILayoutOption[0]);
-			GUILayout.BeginHorizontal((GUILayoutOption[])(object)new GUILayoutOption[0]);
-			GUILayoutOption[] array = (GUILayoutOption[])(object)new GUILayoutOption[2]
-			{
-				GUILayout.Width(80f),
-				GUILayout.Height(35f)
-			};
+			EnsureGuiCache();
+			GUILayout.BeginVertical(_noLayoutOptions);
+			GUILayout.BeginHorizontal(_noLayoutOptions);
+			GUILayoutOption[] array = _buttonLayoutOptions;
 			if (GUILayout.Button("Back(1m)", array))
 			{
 				MoveForwardBackward(-1f);
@@ -240,7 +256,7 @@ public class VRCameraMoveHelper : MonoBehaviour
 				MoveToSelectedObject(lockY: true);
 			}
 			GUILayout.EndHorizontal();
-			GUILayout.BeginHorizontal((GUILayoutOption[])(object)new GUILayoutOption[0]);
+			GUILayout.BeginHorizontal(_noLayoutOptions);
 			if (GUILayout.Button("Fwd(1m)", array))
 			{
 				MoveForwardBackward(1f);
@@ -261,11 +277,19 @@ public class VRCameraMoveHelper : MonoBehaviour
 
 	public void SaveCamera(int slot)
 	{
-		if (!(VR.Camera.Head == null))
+		if (VR.Camera.Head == null)
+			return;
+		if (!TryResolveCameraCtrl(out Studio.CameraControl cameraCtrl)
+			|| studio.sceneInfo == null
+			|| studio.sceneInfo.cameraData == null
+			|| slot < 0
+			|| slot >= studio.sceneInfo.cameraData.Length)
 		{
-			CurrentToCameraCtrl();
-			studio.sceneInfo.cameraData[slot] = studio.cameraCtrl.Export();
+			VRLog.Warn("SaveCamera skipped: Studio camera data is not ready.");
+			return;
 		}
+		CurrentToCameraCtrl();
+		studio.sceneInfo.cameraData[slot] = cameraCtrl.Export();
 	}
 
 	public void CurrentToCameraCtrl()
@@ -279,13 +303,22 @@ public class VRCameraMoveHelper : MonoBehaviour
 		//IL_0064: Unknown result type (might be due to invalid IL or missing references)
 		//IL_0065: Unknown result type (might be due to invalid IL or missing references)
 		//IL_0066: Unknown result type (might be due to invalid IL or missing references)
+		if (VR.Camera == null || VR.Camera.Head == null)
+		{
+			VRLog.Warn("CurrentToCameraCtrl skipped: VR head is not ready.");
+			return;
+		}
+		if (!TryResolveCameraCtrl(out Studio.CameraControl cameraCtrl))
+		{
+			VRLog.Warn("CurrentToCameraCtrl skipped: Studio cameraCtrl is not ready.");
+			return;
+		}
 		GetCurrentLookDirAndRot(out var lookPoint, out var dir, out var rot);
 		var val = new Studio.CameraControl.CameraData();
-		VR.Camera.Head.TransformPoint(dir.normalized * DEFAULT_DISTANCE * DISTANCE_RATIO);
 		Vector3 val2 = default(Vector3);
 		val2 = new Vector3(0f, 0f, -1f * DEFAULT_DISTANCE * DISTANCE_RATIO);
-		val.Set(lookPoint, rot, val2, studio.cameraCtrl.fieldOfView);
-		studio.cameraCtrl.Import(val);
+		val.Set(lookPoint, rot, val2, cameraCtrl.fieldOfView);
+		cameraCtrl.Import(val);
 	}
 
 	private void GetCurrentLookDirAndRot(out Vector3 lookPoint, out Vector3 dir, out Vector3 rot)
@@ -325,8 +358,22 @@ public class VRCameraMoveHelper : MonoBehaviour
 
 	public void MoveToCamera(int slot)
 	{
+		if (!TryResolveCameraCtrl(out Studio.CameraControl cameraCtrl)
+			|| studio.sceneInfo == null
+			|| studio.sceneInfo.cameraData == null
+			|| slot < 0
+			|| slot >= studio.sceneInfo.cameraData.Length)
+		{
+			VRLog.Warn("MoveToCamera skipped: Studio camera slot data is not ready.");
+			return;
+		}
 		var val = studio.sceneInfo.cameraData[slot];
-		studio.cameraCtrl.Import(val);
+		if (val == null)
+		{
+			VRLog.Warn("MoveToCamera skipped: camera slot " + slot + " is empty.");
+			return;
+		}
+		cameraCtrl.Import(val);
 		MoveToCurrent();
 	}
 
@@ -344,10 +391,42 @@ public class VRCameraMoveHelper : MonoBehaviour
 		//IL_003e: Unknown result type (might be due to invalid IL or missing references)
 		//IL_0040: Unknown result type (might be due to invalid IL or missing references)
 		//IL_0041: Unknown result type (might be due to invalid IL or missing references)
-		var val = studio.cameraCtrl.Export();
-		Vector3 tobeHeadPos = val.pos + Quaternion.Euler(val.rotate) * val.distance;
-		Quaternion tobeHeadRot = Quaternion.Euler(val.rotate);
-		MoveTo(tobeHeadPos, tobeHeadRot);
+		try
+		{
+			// OnLevelWasLoaded does not run for the scene that is already loaded
+			// when this component is created, so the cached studio reference stays
+			// null through the startup alignment. KKS can also report a Studio
+			// instance before cameraCtrl exists.
+			if (!TryResolveCameraCtrl(out Studio.CameraControl cameraCtrl))
+			{
+				VRLog.Warn("MoveToCurrent skipped: Studio cameraCtrl is not ready.");
+				return;
+			}
+			Studio.CameraControl.CameraData val = cameraCtrl.Export();
+			if (val == null)
+			{
+				VRLog.Warn("MoveToCurrent skipped: Studio camera export returned null.");
+				return;
+			}
+			Vector3 tobeHeadPos = val.pos + Quaternion.Euler(val.rotate) * val.distance;
+			Quaternion tobeHeadRot = Quaternion.Euler(val.rotate);
+			MoveTo(tobeHeadPos, tobeHeadRot);
+		}
+		catch (Exception ex)
+		{
+			VRLog.Error("MoveToCurrent failed: " + ex.Message);
+		}
+	}
+
+	private bool TryResolveCameraCtrl(out Studio.CameraControl cameraCtrl)
+	{
+		cameraCtrl = null;
+		Studio.Studio resolved = studio != null ? studio : Singleton<Studio.Studio>.Instance;
+		if (resolved == null)
+			return false;
+		studio = resolved;
+		cameraCtrl = resolved.cameraCtrl;
+		return cameraCtrl != null;
 	}
 
 	public void MoveTo(Vector3 tobeHeadPos, Quaternion tobeHeadRot)
@@ -450,6 +529,19 @@ public class VRCameraMoveHelper : MonoBehaviour
 		Vector3 tobeHeadPos = VR.Camera.Head.position + dir * distance;
 		tobeHeadPos.y = VR.Camera.Head.position.y;
 		MoveTo(tobeHeadPos, Quaternion.Euler(rot));
+	}
+
+	private void EnsureGuiCache()
+	{
+		if (_windowGui != null)
+			return;
+		_windowGui = FuncWindowGUI;
+		_noLayoutOptions = new GUILayoutOption[0];
+		_buttonLayoutOptions = new GUILayoutOption[2]
+		{
+			GUILayout.Width(80f),
+			GUILayout.Height(35f)
+		};
 	}
 
 	private void Init(Transform cameraMenuRootT)

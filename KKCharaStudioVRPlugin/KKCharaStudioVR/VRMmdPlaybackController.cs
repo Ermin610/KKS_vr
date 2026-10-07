@@ -16,17 +16,38 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
     private const float HeelRetrySeconds = 0.75f;
     private const float StickDeadzone = 0.15f;
     private const float YawAdjustSpeed = 60f;
+    private const float PitchAdjustSpeed = 35f;
+    private const float HeightAdjustSpeed = 0.6f;
+    private const float TrimDampingRate = 12f;
+    private const float MaxPitchTrim = 75f;
+    private const float MaxHeightTrim = 2.0f;
     private const float RightStickReleaseTimeout = 1.25f;
     private const float CueOpacityApplyInterval = 0.06f;
     private const float CueOpacityMinimumStep = 0.0095f;
 
     public static VRMmdPlaybackController Instance { get; private set; }
-    public static bool BlocksNormalInput => Instance != null
-        && (Instance._presentationActive || Instance._awaitRightStickRelease);
+    public static bool BlocksNormalInput =>
+        VRMmddStateBridge.PlaybackIsPlaying
+        || (Instance != null
+            && Instance._stateReadable
+            && (Instance._presentationActive || Instance._awaitRightStickRelease));
     public static bool ConsumedPlaybackClickThisFrame =>
         Instance != null && Instance._playbackClickConsumedFrame == Time.frameCount;
+    internal static bool SuppressStickLocomotion =>
+        Instance != null && Instance._suppressLocomotionWhileStickHeld;
+    /// <summary>
+    /// A loaded camera VMD is driving the VR rig. A dance without one does not
+    /// author the headset pose, so the player keeps free locomotion.
+    /// </summary>
+    internal static bool HasActiveCameraMotion =>
+        VRMmddStateBridge.PlaybackAvailable && VRMmddStateBridge.DirectVrCameraOwner;
+    internal static bool IsPlaybackInputActive =>
+        VRMmddStateBridge.PlaybackIsPlaying || BlocksNormalInput;
+    internal static VRStudioInteractionPolicy.MmdMovementPlan MovementPlan =>
+        VRStudioInteractionPolicy.PlanMmdMovement(IsPlaybackInputActive, HasActiveCameraMotion);
     private KKCharaStudioVRSettings _settings;
     private bool _presentationActive;
+    private bool _stateReadable = true;
     private bool _awaitRightStickRelease;
     private float _rightStickReleaseDeadline;
     private bool _lastReportedPlaying;
@@ -35,6 +56,15 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
     private bool _fovDirty;
     private float _runtimeFov = VRMmddService.DefaultFixedFov;
     private float _runtimeYawOffset;
+    private float _targetYawOffset;
+    private float _currentYawOffset;
+    private float _targetPitchOffset;
+    private float _currentPitchOffset;
+    private float _targetHeightOffset;
+    private float _currentHeightOffset;
+    private float _targetDistanceOffset;
+    private float _currentDistanceOffset;
+    private int _trimAppliedFrame = -1;
     private float _nextReporterRetry;
     private float _nextFovApply;
     private float _nextHeelRetry;
@@ -43,6 +73,16 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
     private int _lastGeneration = -1;
     private int _playbackClickConsumedFrame = -1;
     private bool _resumeMmdOnLeftStick;
+    private bool _lastLeftStickPressed;
+    private bool _lastRightStickPressed;
+    private bool _stickTransportLatched;
+    private bool _suppressLocomotionWhileStickHeld;
+    private bool _pausedStickEdgeReady;
+    private bool _pausedLeftLast;
+    private bool _pausedRightLast;
+    private bool _pausedLeftReleaseSeen;
+    private bool _pausedRightReleaseSeen;
+    private bool _keepUiAfterSummon;
     private bool _applicationQuitting;
     private string _currentVmdPath;
     private int[] _targetObjectKeys = new int[0];
@@ -61,15 +101,30 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
         _runtimeOpacitySessions =
             new Dictionary<int, VRClothingOpacityService.RuntimeOpacitySession>();
     private readonly Dictionary<int, int> _pendingHighHeels = new Dictionary<int, int>();
+    private readonly HashSet<int> _opacityParts = new HashSet<int>();
+    private readonly List<int> _heelScratch = new List<int>();
+    private bool _mmdCameraLockHeld;
 
     public string CurrentVmdPath => _currentVmdPath;
     public VRMmdCueSheet EffectiveCueSheet => _effectiveCueSheet;
     public bool HasCustomCueSheet => _hasCustomCueSheet;
     public bool IsPresentationActive => _presentationActive;
     internal static bool IsPresentationCameraControlActive =>
-        Instance != null && Instance._presentationActive;
+        Instance != null && (Instance._presentationActive || VRMmddStateBridge.PlaybackIsPlaying);
     internal static float PresentationYawOffset =>
-        Instance != null ? Instance._runtimeYawOffset : 0f;
+        Instance != null ? Instance._currentYawOffset : 0f;
+    internal static float PresentationPitchOffset =>
+        Instance != null ? Instance._currentPitchOffset : 0f;
+    internal static float PresentationHeightOffset =>
+        Instance != null ? Instance._currentHeightOffset : 0f;
+    internal static float PresentationDistanceOffset =>
+        Instance != null ? Instance._currentDistanceOffset : 0f;
+    internal static bool HasActiveCameraTrim =>
+        Instance != null && (
+            Mathf.Abs(Instance._currentYawOffset) > 0.001f
+            || Mathf.Abs(Instance._currentPitchOffset) > 0.001f
+            || Mathf.Abs(Instance._currentHeightOffset) > 0.0001f
+            || Mathf.Abs(Instance._currentDistanceOffset) > 0.0001f);
 
     private void Awake()
     {
@@ -83,6 +138,7 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
         RestoreBaseline();
         ResetPresentationYaw(true);
         SetPresentationActive(false);
+        ReleaseMmdCameraLock("playback controller disabled");
         _awaitRightStickRelease = false;
     }
 
@@ -96,6 +152,7 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
         RestoreBaseline();
         ResetPresentationYaw(true);
         SetPresentationActive(false);
+        ReleaseMmdCameraLock("playback controller destroyed");
         if (Instance == this)
             Instance = null;
     }
@@ -106,18 +163,36 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
         EnsureReporterHealth();
         ProcessPendingHighHeels();
         UpdateRightStickReleaseLatch();
+        ReleaseStickHoldWhenIdle();
 
         bool playbackAvailable = VRMmddStateBridge.PlaybackReported
             && VRMmddStateBridge.PlaybackAvailable
             && Time.realtimeSinceStartup - VRMmddStateBridge.PlaybackReportRealtime <= ReporterStaleSeconds;
         bool isPlaying = playbackAvailable && VRMmddStateBridge.PlaybackIsPlaying;
+        if (isPlaying)
+            _stickTransportLatched = true;
+        else
+            RefreshTransportLatch();
+        if (!isPlaying)
+            _keepUiAfterSummon = false;
 
-        bool shouldPresent = isPlaying
+        bool shouldPresent = _stateReadable
+            && isPlaying
             && _settings != null
-            && _settings.HideHandsAndUiDuringMmd;
+            && _settings.HideHandsAndUiDuringMmd
+            && !_keepUiAfterSummon;
         SetPresentationActive(shouldPresent);
-        if (_presentationActive)
+        UpdateMmdCameraLock(playbackAvailable, isPlaying);
+        if (_presentationActive || isPlaying)
+        {
+            _pausedStickEdgeReady = false;
             UpdatePresentationInput();
+        }
+        else
+        {
+            PollPausedStickTransport();
+        }
+        UpdateCameraTrimSmoothing();
 
         UpdateClothingCues(playbackAvailable, isPlaying);
         _lastReportedPlaying = isPlaying;
@@ -136,6 +211,7 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
         RestoreBaseline();
         ResetCuePlaybackState();
         SetPresentationActive(false);
+        ReleaseMmdCameraLock("character replacement");
         _lastReportedPlaying = false;
     }
 
@@ -144,6 +220,7 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
         ClearLeftStickTransportResume();
         ResetCuePlaybackState();
         SetPresentationActive(false);
+        ReleaseMmdCameraLock("character replacement rebound");
         _lastReportedPlaying = false;
     }
 
@@ -151,6 +228,7 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
     {
         ClearLeftStickTransportResume();
         ResetCuePlaybackState();
+        ReleaseMmdCameraLock("package load failed");
         ReloadCueSheet();
     }
 
@@ -162,6 +240,7 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
         _currentVmdPath = motionPath;
         _targetObjectKeys = targetObjectKeys ?? new int[0];
         ResetCuePlaybackState();
+        ReleaseMmdCameraLock("package loaded");
         ReloadCueSheet();
     }
 
@@ -170,6 +249,7 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
         ClearLeftStickTransportResume();
         RestoreBaseline();
         ResetCuePlaybackState();
+        ReleaseMmdCameraLock("returned to start");
     }
 
     public void RequestHighHeelsRefresh(int[] objectKeys)
@@ -274,6 +354,8 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
                 remaining.Add(key);
         }
         _targetObjectKeys = remaining.ToArray();
+        if (remaining.Count == 0)
+            _stickTransportLatched = false;
         _cuePlaybackActive = false;
         _appliedCueCount = 0;
         _lastNormalized = -1f;
@@ -282,6 +364,7 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
         _cueStateByTargetPart.Clear();
         ResetPresentationYaw(true);
         SetPresentationActive(false);
+        ReleaseMmdCameraLock("target motion cleared");
         VRMmdCameraAnchorController.ResetForSceneTransition();
     }
 
@@ -320,13 +403,44 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
         Instance.RestoreBaseline();
         Instance.ResetCuePlaybackState();
         Instance.SetPresentationActive(false);
+        Instance.ReleaseMmdCameraLock("scene transition");
         Instance.ClearLeftStickTransportResume();
         Instance._pendingHighHeels.Clear();
+        Instance._stickTransportLatched = false;
+        Instance._suppressLocomotionWhileStickHeld = false;
+        Instance._pausedStickEdgeReady = false;
     }
+
+    private static int _fallbackToggleFrame = -1;
 
     internal static bool TryHandleLeftStickPlaybackToggle()
     {
-        return Instance != null && Instance.HandleLeftStickPlaybackToggle();
+        if (Instance != null)
+            return Instance.HandleLeftStickPlaybackToggle();
+
+        // No instance means no consumed-frame latch; keep one here so several
+        // input handlers seeing the same click cannot toggle twice in one frame.
+        if (_fallbackToggleFrame == Time.frameCount)
+            return true;
+        _fallbackToggleFrame = Time.frameCount;
+
+        string status;
+        bool toggled = VRMmddService.TogglePlayPause(out status);
+        if (toggled)
+            VRLog.Info("MMD play/pause toggled without instance: " + status);
+        else
+            VRLog.Warn("MMD play/pause failed without instance: " + status);
+        return toggled;
+    }
+
+    internal static void ReleasePresentationForUiSummon()
+    {
+        if (Instance == null)
+            return;
+        Instance.ClearLeftStickTransportResume();
+        Instance._keepUiAfterSummon = true;
+        Instance.SetPresentationActive(false);
+        Instance._awaitRightStickRelease = false;
     }
 
     internal static void CancelLeftStickTransportResume()
@@ -357,13 +471,97 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
             || Time.realtimeSinceStartup - VRMmddStateBridge.PlaybackReportRealtime > ReporterStaleSeconds;
         if (stale)
             TryInstallReporter();
+        bool fresh = VRMmddStateBridge.PlaybackReported
+            && Time.realtimeSinceStartup - VRMmddStateBridge.PlaybackReportRealtime <= ReporterStaleSeconds;
+        if (fresh)
+            _stateReadable = true;
     }
+
+    internal static void FailOpenBecauseStateUnreadable(string error)
+    {
+        VRMmddStateBridge.ResetPlayback();
+        if (Instance != null)
+            Instance.ForcePresentationOff(error);
+        else
+            ClearExternalPresentationSuppression("MMDD state unreadable and playback controller is absent");
+    }
+
+    private void ForcePresentationOff(string error)
+    {
+        _stateReadable = false;
+        _awaitRightStickRelease = false;
+        _rightStickReleaseDeadline = 0f;
+        _keepUiAfterSummon = false;
+        _presentationActive = false;
+        _fovAdjusting = false;
+        _lastReportedPlaying = false;
+        ReleaseMmdCameraLock("MMDD state unreadable");
+        ClearExternalPresentationSuppression(
+            "MMDD state unreadable: " + (string.IsNullOrEmpty(error) ? "unknown" : error));
+    }
+
+    internal static void ClearExternalPresentationSuppression(string reason)
+    {
+        if (VRHandModelManager.Instance != null)
+            VRHandModelManager.Instance.SetPresentationSuppressed(false);
+        VRHandModelManager.SetPresentationSuppressionRequested(false);
+        if (VRWristMenuController.Instance != null)
+            VRWristMenuController.Instance.SetPresentationSuppressed(false);
+        if (VRQuickActions.Instance != null)
+            VRQuickActions.Instance.SetPresentationSuppressed(false);
+        if (reason == _lastSuppressionClearReason)
+            return;
+        _lastSuppressionClearReason = reason;
+        VRLog.Info("Presentation suppression cleared. reason=" + reason);
+    }
+
+    private static string _lastSuppressionClearReason;
 
     private void TryInstallReporter()
     {
         _nextReporterRetry = Time.unscaledTime + ReporterRetrySeconds;
         string ignored;
         VRMmddService.EnsurePlaybackStateReporter(out ignored);
+    }
+
+    private void UpdateMmdCameraLock(bool playbackAvailable, bool isPlaying)
+    {
+        bool ownsCamera = _stateReadable
+            && playbackAvailable
+            && isPlaying
+            && VRMmddStateBridge.DirectVrCameraOwner;
+        if (ownsCamera)
+        {
+            if (!_mmdCameraLockHeld)
+            {
+                _mmdCameraLockHeld = true;
+                VRLog.Info("MMD direct VR camera lock acquired.");
+            }
+            return;
+        }
+
+        if (!_mmdCameraLockHeld)
+            return;
+        ReleaseMmdCameraLock(playbackAvailable
+            ? "MMD playback stopped or released the VR camera"
+            : "MMD playback report went stale");
+    }
+
+    private void ReleaseMmdCameraLock(string reason)
+    {
+        bool held = _mmdCameraLockHeld;
+        _mmdCameraLockHeld = false;
+        // The follow controller renews the CameraSync lease while MMDD is the
+        // owner. Clearing it here, and from every stop path, means a missed
+        // LateUpdate cannot leave the studio camera yielded. The anchor undoes
+        // a presentation yaw that is still on the rig so the next play does
+        // not add that yaw a second time. The right-stick release latch stays
+        // with SetPresentationActive so that same edge cannot become locomotion.
+        VRTimelineCameraFollowController.ReleaseMmdCameraLock();
+        VRMmdCameraAnchorController.ReleasePresentationYaw();
+        if (!held)
+            return;
+        VRLog.Info("MMD direct VR camera lock released. reason=" + reason);
     }
 
     private void SetPresentationActive(bool active)
@@ -430,15 +628,45 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
 
         if (left != null)
         {
+            bool leftPressed = left.GetPress(EVRButtonId.k_EButton_Axis0);
+            bool leftDown = left.GetPressDown(EVRButtonId.k_EButton_Axis0)
+                || (!_lastLeftStickPressed && leftPressed);
+            _lastLeftStickPressed = leftPressed;
+
             bool leftChorded = left.GetPress(EVRButtonId.k_EButton_Grip)
                 || left.GetPress(EVRButtonId.k_EButton_Axis1)
                 || left.GetPress(EVRButtonId.k_EButton_ApplicationMenu);
-            if (!leftChorded && left.GetPressDown(EVRButtonId.k_EButton_Axis0))
+            if (!leftChorded && leftDown && !_suppressLocomotionWhileStickHeld)
             {
-                // MMD transport belongs exclusively to the left hand.
                 if (HandleLeftStickPlaybackToggle())
                     return;
             }
+        }
+        else
+        {
+            _lastLeftStickPressed = false;
+        }
+
+        // Fallback for single-controller (right hand only) mode
+        if (left == null && right != null)
+        {
+            bool rightPressed = right.GetPress(EVRButtonId.k_EButton_Axis0);
+            bool rightDown = right.GetPressDown(EVRButtonId.k_EButton_Axis0)
+                || (!_lastRightStickPressed && rightPressed);
+            _lastRightStickPressed = rightPressed;
+
+            bool rightChorded = right.GetPress(EVRButtonId.k_EButton_Grip)
+                || right.GetPress(EVRButtonId.k_EButton_Axis1)
+                || right.GetPress(EVRButtonId.k_EButton_ApplicationMenu);
+            if (!rightChorded && rightDown && !_suppressLocomotionWhileStickHeld)
+            {
+                if (HandleLeftStickPlaybackToggle())
+                    return;
+            }
+        }
+        else
+        {
+            _lastRightStickPressed = false;
         }
 
         // The right hand remains available for continuous FOV/yaw composition
@@ -455,7 +683,9 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
 
         // Timeline owns the right-hand camera controls while its control space
         // is active. Do not let MMDD consume the same stick or reset button.
-        if (VRTimelineCameraFollowController.IsTimelineControlSpaceActive)
+        // Without a camera motion the right stick is ordinary locomotion.
+        if (VRTimelineCameraFollowController.IsTimelineControlSpaceActive
+            || !HasActiveCameraMotion)
         {
             if (_fovAdjusting)
             {
@@ -468,83 +698,228 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
         bool resetChorded = right.GetPress(EVRButtonId.k_EButton_Grip)
             || right.GetPress(EVRButtonId.k_EButton_Axis1)
             || right.GetPress(EVRButtonId.k_EButton_ApplicationMenu);
-        if (!resetChorded && right.GetPressDown(EVRButtonId.k_EButton_A))
+        bool stickClick = right.GetPressDown(EVRButtonId.k_EButton_Axis0);
+        bool aClick = right.GetPressDown(EVRButtonId.k_EButton_A);
+        if (!resetChorded && aClick)
         {
             ResetPresentationComposition(right);
             return;
         }
-
-        Vector2 stick = right.GetAxis(EVRButtonId.k_EButton_Axis0);
-        float fovAxis = Mathf.Abs(stick.y) > StickDeadzone ? stick.y : 0f;
-        float yawAxis = Mathf.Abs(stick.x) > StickDeadzone ? stick.x : 0f;
-
-        if (Mathf.Abs(yawAxis) > 0.0001f)
+        // Right-stick click is play/pause, the same as the left stick.
+        // Deflection still trims the camera; A resets composition.
+        if (!resetChorded && stickClick)
         {
-            _runtimeYawOffset = NormalizeYaw(
-                _runtimeYawOffset
-                + yawAxis * YawAdjustSpeed * Time.unscaledDeltaTime);
+            HandleLeftStickPlaybackToggle();
+            return;
         }
 
-        if (Mathf.Abs(fovAxis) <= 0.0001f)
+        Vector2 stick = right.GetAxis(EVRButtonId.k_EButton_Axis0);
+        if (stick.sqrMagnitude < 0.01f)
+        {
+            Vector2 axis2 = right.GetAxis(EVRButtonId.k_EButton_Axis2);
+            if (axis2.sqrMagnitude > 0.01f)
+                stick = axis2;
+        }
+
+        bool gripHeld = right.GetPress(EVRButtonId.k_EButton_Grip);
+        bool triggerHeld = right.GetPress(EVRButtonId.k_EButton_Axis1);
+
+        if (triggerHeld)
+        {
+            // Trigger owns the stick for FOV. Consume the frame so locomotion
+            // does not also turn this deflection into a camera nudge.
+            _trimAppliedFrame = Time.frameCount;
+            float fovAxis = Mathf.Abs(stick.y) > StickDeadzone ? stick.y : 0f;
+            if (Mathf.Abs(fovAxis) <= 0.0001f)
+            {
+                if (_fovAdjusting)
+                {
+                    _fovAdjusting = false;
+                    CommitRuntimeFov();
+                }
+            }
+            else
+            {
+                if (!_fovAdjusting)
+                {
+                    _fovAdjusting = true;
+                    string ignored;
+                    VRMmddService.RefreshFixedFov(out ignored);
+                    _runtimeFov = VRMmddStateBridge.FixedFovReported
+                        ? VRMmddStateBridge.FixedFovValue
+                        : VRMmddService.DefaultFixedFov;
+                }
+
+                float speed = _settings != null ? _settings.MmdFovAdjustSpeed : 20f;
+                _runtimeFov = Mathf.Clamp(
+                    _runtimeFov + fovAxis * speed * Time.unscaledDeltaTime,
+                    VRMmddService.MinFixedFov,
+                    VRMmddService.MaxFixedFov);
+                _fovDirty = true;
+                if (Time.unscaledTime >= _nextFovApply)
+                {
+                    _nextFovApply = Time.unscaledTime + FovApplyInterval;
+                    string ignored;
+                    VRMmddService.SetFixedFovRuntime(_runtimeFov, out ignored);
+                }
+            }
+        }
+        else
         {
             if (_fovAdjusting)
             {
                 _fovAdjusting = false;
                 CommitRuntimeFov();
             }
-            return;
-        }
-
-        if (!_fovAdjusting)
-        {
-            _fovAdjusting = true;
-            string ignored;
-            VRMmddService.RefreshFixedFov(out ignored);
-            _runtimeFov = VRMmddStateBridge.FixedFovReported
-                ? VRMmddStateBridge.FixedFovValue
-                : VRMmddService.DefaultFixedFov;
-        }
-
-        float speed = _settings != null ? _settings.MmdFovAdjustSpeed : 20f;
-        _runtimeFov = Mathf.Clamp(
-            _runtimeFov + fovAxis * speed * Time.unscaledDeltaTime,
-            VRMmddService.MinFixedFov,
-            VRMmddService.MaxFixedFov);
-        _fovDirty = true;
-        if (Time.unscaledTime >= _nextFovApply)
-        {
-            _nextFovApply = Time.unscaledTime + FovApplyInterval;
-            string ignored;
-            VRMmddService.SetFixedFovRuntime(_runtimeFov, out ignored);
+            HandleRightStickCameraTrim(stick, gripHeld, Time.unscaledDeltaTime);
         }
     }
 
-    private bool HandleLeftStickPlaybackToggle()
+    private static bool IsFreshPlaybackReport()
+    {
+        return VRMmddStateBridge.PlaybackReported
+            && Time.realtimeSinceStartup - VRMmddStateBridge.PlaybackReportRealtime <= ReporterStaleSeconds;
+    }
+
+    private void RefreshTransportLatch()
+    {
+        if (!IsFreshPlaybackReport() || !VRMmddStateBridge.PlaybackAvailable)
+            return;
+        if (VRMmddStateBridge.PlaybackIsPlaying
+            || VRMmddStateBridge.PlaybackEndFrame > VRMmddStateBridge.PlaybackStartFrame + 0.5f)
+            _stickTransportLatched = true;
+    }
+
+    /// <summary>
+    /// A transport click holds the stick until both thumbsticks are physically
+    /// released. This used to be cleared only on the paused path, so a click that
+    /// started playback left the hold latched for the whole clip and the next
+    /// click (pause) was treated as "already consumed" and ignored.
+    /// </summary>
+    private void ReleaseStickHoldWhenIdle()
+    {
+        if (!_suppressLocomotionWhileStickHeld)
+            return;
+        // The click that set the hold happened earlier in this frame; keep it
+        // until at least the next frame so the same press cannot replay.
+        if (_playbackClickConsumedFrame == Time.frameCount)
+            return;
+        SteamVR_Controller.Device left = GetDevice(VR.Mode != null ? VR.Mode.Left : null);
+        SteamVR_Controller.Device right = GetDevice(VR.Mode != null ? VR.Mode.Right : null);
+        bool leftHeld = left != null && left.GetPress(EVRButtonId.k_EButton_Axis0);
+        bool rightHeld = right != null && right.GetPress(EVRButtonId.k_EButton_Axis0);
+        if (!leftHeld && !rightHeld)
+            _suppressLocomotionWhileStickHeld = false;
+    }
+
+    private void PollPausedStickTransport()
+    {
+        RefreshTransportLatch();
+        SteamVR_Controller.Device left = GetDevice(VR.Mode != null ? VR.Mode.Left : null);
+        SteamVR_Controller.Device right = GetDevice(VR.Mode != null ? VR.Mode.Right : null);
+        bool leftHeld = left != null && left.GetPress(EVRButtonId.k_EButton_Axis0);
+        bool rightHeld = right != null && right.GetPress(EVRButtonId.k_EButton_Axis0);
+        if (_suppressLocomotionWhileStickHeld && !leftHeld && !rightHeld)
+            _suppressLocomotionWhileStickHeld = false;
+
+        // The click that just paused is still held on this first paused frame.
+        // Sync it so that same press cannot immediately start playback again,
+        // and cannot fall through into locomotion.
+        if (!_pausedStickEdgeReady)
+        {
+            _pausedLeftLast = leftHeld;
+            _pausedRightLast = rightHeld;
+            _pausedLeftReleaseSeen = !leftHeld;
+            _pausedRightReleaseSeen = !rightHeld;
+            _pausedStickEdgeReady = true;
+            return;
+        }
+
+        bool leftClick = ReadPausedStickClick(left, leftHeld, ref _pausedLeftLast, ref _pausedLeftReleaseSeen);
+        bool rightClick = ReadPausedStickClick(right, rightHeld, ref _pausedRightLast, ref _pausedRightReleaseSeen);
+        if (leftClick || rightClick)
+            HandleLeftStickPlaybackToggle();
+    }
+
+    private static bool ReadPausedStickClick(
+        SteamVR_Controller.Device device,
+        bool held,
+        ref bool lastHeld,
+        ref bool releaseSeen)
+    {
+        bool down = device != null && (device.GetPressDown(EVRButtonId.k_EButton_Axis0) || (!lastHeld && held));
+        lastHeld = held;
+        if (!releaseSeen)
+        {
+            if (!held)
+                releaseSeen = true;
+            return false;
+        }
+        if (!down || device == null)
+            return false;
+        if (device.GetPress(EVRButtonId.k_EButton_Grip)
+            || device.GetPress(EVRButtonId.k_EButton_Axis1)
+            || device.GetPress(EVRButtonId.k_EButton_ApplicationMenu))
+            return false;
+        return true;
+    }
+
+    internal bool HandleLeftStickPlaybackToggle()
     {
         if (_playbackClickConsumedFrame == Time.frameCount)
             return true;
 
-        if (_resumeMmdOnLeftStick)
+        RefreshTransportLatch();
+        bool reportFresh = IsFreshPlaybackReport();
+        bool reportedPlaying = reportFresh && VRMmddStateBridge.PlaybackIsPlaying;
+        VRStudioInteractionPolicy.StickPlan plan = VRStudioInteractionPolicy.PlanStick(
+            true,
+            VRStudioInteractionPolicy.CanToggle(
+                _stickTransportLatched,
+                reportFresh,
+                VRMmddStateBridge.PlaybackAvailable,
+                VRMmddStateBridge.PlaybackStartFrame,
+                VRMmddStateBridge.PlaybackEndFrame,
+                reportedPlaying),
+            reportFresh,
+            reportedPlaying,
+            // A click whose stick is still held from the previous transport
+            // change is the same physical press (or a stale rising edge).
+            // Treat it as already consumed; the hold is released by
+            // ReleaseStickHoldWhenIdle once both sticks are up.
+            _suppressLocomotionWhileStickHeld,
+            _suppressLocomotionWhileStickHeld);
+        // A press still held from the previous transport change is owned by
+        // transport. Returning false would let callers fall through to undo or
+        // Timeline on a sticky OpenXR down edge.
+        if (plan.Operation == VRStudioInteractionPolicy.TransportOp.Ignore)
+            return VRStudioInteractionPolicy.TransportOwnsHeldPress(plan, _suppressLocomotionWhileStickHeld);
+
+        string mmdStatus;
+        bool ok;
+        if (plan.Operation == VRStudioInteractionPolicy.TransportOp.Pause)
+            ok = VRMmddService.PausePlayback(out mmdStatus);
+        else if (plan.Operation == VRStudioInteractionPolicy.TransportOp.Start)
+            ok = VRMmddService.StartPlayback(out mmdStatus);
+        else
+            ok = VRMmddService.TogglePlayPause(out mmdStatus);
+
+        _playbackClickConsumedFrame = Time.frameCount;
+        _suppressLocomotionWhileStickHeld = plan.HoldUntilRelease;
+        _resumeMmdOnLeftStick = false;
+        if (!ok)
         {
-            _playbackClickConsumedFrame = Time.frameCount;
-            ResumeLeftStickMmdTransport();
+            VRLog.Warn("MMD stick transport " + plan.Operation + " failed: " + mmdStatus);
             return true;
         }
 
-        if (!IsFreshMmdPlaybackPlaying())
-            return false;
-
-        string mmdStatus;
-        bool mmdPaused = VRMmddService.PausePlayback(out mmdStatus);
-        if (!mmdPaused)
-            VRLog.Warn(mmdStatus);
-
-        if (!mmdPaused)
-            return false;
-
-        _resumeMmdOnLeftStick = true;
-        _playbackClickConsumedFrame = Time.frameCount;
-        SetPresentationActive(false);
+        if (VRMmddStateBridge.PlaybackIsPlaying
+            || VRMmddStateBridge.PlaybackEndFrame > VRMmddStateBridge.PlaybackStartFrame + 0.5f)
+            _stickTransportLatched = true;
+        if (!VRMmddStateBridge.PlaybackIsPlaying)
+            SetPresentationActive(false);
+        VRLog.Info("MMD stick transport " + plan.Operation + ": " + mmdStatus
+            + " (playing=" + VRMmddStateBridge.PlaybackIsPlaying + ")");
         return true;
     }
 
@@ -588,6 +963,98 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
             VRLog.Warn(status);
     }
 
+    private void UpdateCameraTrimSmoothing()
+    {
+        float dt = Time.unscaledDeltaTime;
+        if (dt <= 0.0001f) return;
+        float alpha = 1f - Mathf.Exp(-TrimDampingRate * dt);
+        alpha = Mathf.Clamp01(alpha);
+
+        _currentYawOffset = Mathf.LerpAngle(_currentYawOffset, _targetYawOffset, alpha);
+        _currentPitchOffset = Mathf.Lerp(_currentPitchOffset, _targetPitchOffset, alpha);
+        _currentHeightOffset = Mathf.Lerp(_currentHeightOffset, _targetHeightOffset, alpha);
+        _currentDistanceOffset = Mathf.Lerp(_currentDistanceOffset, _targetDistanceOffset, alpha);
+        _runtimeYawOffset = _currentYawOffset;
+    }
+
+    internal static void ApplyRightStickCameraTrim(Vector2 stick, bool gripHeld, float dt)
+    {
+        if (Instance != null)
+            Instance.HandleRightStickCameraTrim(stick, gripHeld, dt);
+    }
+
+    internal void HandleRightStickCameraTrim(Vector2 stick, bool gripHeld, float dt)
+    {
+        if (_trimAppliedFrame == Time.frameCount || !HasActiveCameraMotion)
+            return;
+        _trimAppliedFrame = Time.frameCount;
+
+        if (!IsFinite(stick.x) || !IsFinite(stick.y))
+            return;
+
+        float deadzone = StickDeadzone;
+        float magX = Mathf.Abs(stick.x);
+        float magY = Mathf.Abs(stick.y);
+
+        float inX = 0f;
+        if (magX > deadzone)
+            inX = Mathf.Sign(stick.x) * ((magX - deadzone) / (1f - deadzone));
+
+        float inY = 0f;
+        if (magY > deadzone)
+            inY = Mathf.Sign(stick.y) * ((magY - deadzone) / (1f - deadzone));
+
+        if (Mathf.Abs(inX) <= 0.0001f && Mathf.Abs(inY) <= 0.0001f)
+            return;
+
+        // Offsets stay on the playback controller. The camera anchor reapplies
+        // them after MMDD writes the authored pose, so the nudge cannot spin
+        // the rig or get baked into the next camera keyframe.
+        if (Mathf.Abs(inX) > 0.0001f)
+        {
+            _targetYawOffset = NormalizeYaw(
+                _targetYawOffset + inX * YawAdjustSpeed * dt);
+        }
+        if (Mathf.Abs(inY) > 0.0001f)
+        {
+            if (gripHeld)
+            {
+                _targetHeightOffset = Mathf.Clamp(
+                    _targetHeightOffset + inY * HeightAdjustSpeed * dt,
+                    -MaxHeightTrim, MaxHeightTrim);
+            }
+            else
+            {
+                _targetPitchOffset = Mathf.Clamp(
+                    _targetPitchOffset - inY * PitchAdjustSpeed * dt,
+                    -MaxPitchTrim, MaxPitchTrim);
+            }
+        }
+    }
+
+    internal static void ResetCameraTrim(bool immediate = false)
+    {
+        if (Instance != null)
+            Instance.ResetCameraTrimInternal(immediate);
+    }
+
+    private void ResetCameraTrimInternal(bool immediate)
+    {
+        _targetYawOffset = 0f;
+        _targetPitchOffset = 0f;
+        _targetHeightOffset = 0f;
+        _targetDistanceOffset = 0f;
+        if (immediate)
+        {
+            _currentYawOffset = 0f;
+            _currentPitchOffset = 0f;
+            _currentHeightOffset = 0f;
+            _currentDistanceOffset = 0f;
+            _runtimeYawOffset = 0f;
+        }
+        VRLog.Info("MMD Camera Trim reset to authored pose.");
+    }
+
     private void ResetPresentationComposition(SteamVR_Controller.Device right)
     {
         _runtimeYawOffset = 0f;
@@ -595,9 +1062,7 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
         _fovAdjusting = false;
         _fovDirty = false;
 
-        // Reset yaw before MMDD evaluates the default FOV so the final camera
-        // correction restores the authored direction instead of preserving the
-        // previous user offset.
+        ResetCameraTrimInternal(false);
         VRMmdCameraAnchorController.RefreshPresentationYawNow();
         string status;
         if (!VRMmddService.SetFixedFov(_runtimeFov, out status))
@@ -617,9 +1082,7 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
 
     private void ResetPresentationYaw(bool restoreCurrentRig)
     {
-        if (Mathf.Abs(_runtimeYawOffset) <= 0.0001f)
-            return;
-        _runtimeYawOffset = 0f;
+        ResetCameraTrimInternal(true);
         if (restoreCurrentRig)
             VRMmdCameraAnchorController.RefreshPresentationYawNow();
     }
@@ -797,16 +1260,16 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
         if (_effectiveCueSheet?.Cues == null)
             return;
 
-        HashSet<int> parts = new HashSet<int>();
+        _opacityParts.Clear();
         foreach (VRMmdCue cue in _effectiveCueSheet.Cues)
         {
             if (cue != null && cue.TargetTransparency >= 0f)
-                parts.Add(cue.PartId);
+                _opacityParts.Add(cue.PartId);
         }
 
         foreach (int objectKey in _targetObjectKeys)
         {
-            foreach (int partId in parts)
+            foreach (int partId in _opacityParts)
             {
                 long key = BuildTargetPartKey(objectKey, partId);
                 byte state;
@@ -987,7 +1450,10 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
             return;
         }
 
-        foreach (int objectKey in new List<int>(_pendingHighHeels.Keys))
+        _heelScratch.Clear();
+        foreach (int objectKey in _pendingHighHeels.Keys)
+            _heelScratch.Add(objectKey);
+        foreach (int objectKey in _heelScratch)
         {
             bool deferred;
             string status;
@@ -1016,9 +1482,19 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
 
     private static SteamVR_Controller.Device GetDevice(VRGIN.Controls.Controller controller)
     {
-        if (controller == null || !controller.IsTracking)
+        if (controller == null)
             return null;
-        SteamVR_TrackedObject tracked = controller.GetComponent<SteamVR_TrackedObject>();
-        return tracked != null ? SteamVR_Controller.Input((int)tracked.index) : null;
+#if KKS
+        SteamVR_Controller.Device dev = SteamVR_Controller.ForController(controller);
+        if (dev != null && dev.connected)
+            return dev;
+#endif
+        if (controller.IsTracking)
+        {
+            SteamVR_TrackedObject tracked = controller.GetComponent<SteamVR_TrackedObject>();
+            if (tracked != null && tracked.index != SteamVR_TrackedObject.EIndex.None)
+                return SteamVR_Controller.Input((int)tracked.index);
+        }
+        return null;
     }
 }

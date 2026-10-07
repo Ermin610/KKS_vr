@@ -92,6 +92,7 @@ public class KKCharaStudioVRPlugin : BaseUnityPlugin
             SaveLoadSceneHook.InstallHook();
             LoadFixHook.InstallHook();
             DropdownFixHook.InstallHook();
+            // VRSpawnPlacementHook is disabled to preserve Studio native default coordinates (world origin) for VMD alignment.
             _managedVrEnabled = true;
         }
         else
@@ -953,8 +954,8 @@ public class KKCharaStudioVRPlugin : BaseUnityPlugin
 
         ConfigDescription presetDescription = new ConfigDescription(
             presets.Length > 0
-                ? "从 reshade-shaders 根目录选择可用预设；运行中新增的 INI 会由 VR 菜单动态读取。快捷键默认 F9。"
-                : "reshade-shaders 根目录没有可用预设；可在运行中添加有效 INI 后从 VR 菜单刷新。",
+                ? "从 reshade-presets 目录选择可用预设；运行中新增的 INI 会由 VR 菜单动态读取。快捷键默认 F9。"
+                : "reshade-presets 目录没有可用预设；可在运行中添加有效 INI 后从 VR 菜单刷新。",
             null,
             new object[0]);
         _desktopReShadePreset = Config.Bind(

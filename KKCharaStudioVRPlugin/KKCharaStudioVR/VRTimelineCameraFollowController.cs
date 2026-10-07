@@ -21,6 +21,7 @@ internal sealed class VRTimelineCameraFollowController : MonoBehaviour
     private const float CompositionApplyInterval = 0.08f;
     private const float TimelineVerticalAdjustSpeed = 0.6f;
     private const float TimelineYawAdjustSpeed = 60f;
+    private const float StickSettleSeconds = 2.5f;
 
     private static VRTimelineCameraFollowController _instance;
     private static bool _sceneTransitionActive;
@@ -38,6 +39,9 @@ internal sealed class VRTimelineCameraFollowController : MonoBehaviour
     private MethodInfo _clearTimelineUserPoseOffsetMethod;
     private MethodInfo _setExternalVrCameraOwnerMethod;
     private MethodInfo _isTimelineCameraWriterActiveMethod;
+    private Func<bool> _isTimelineCameraWriterActive;
+    private static readonly object[] ExternalOwnerOn = { true };
+    private static readonly object[] ExternalOwnerOff = { false };
     private bool _suspendedByThisPlugin;
     private bool _timelineSuppressionStateKnown;
     private bool _timelineSuppressionApplied;
@@ -56,6 +60,14 @@ internal sealed class VRTimelineCameraFollowController : MonoBehaviour
     private bool _externalCameraOwnerStateKnown;
     private bool _externalCameraOwnerApplied;
     private int _rightStickTransportConsumedFrame = -1;
+    private bool _sawTimelineStopped;
+    private bool _trustedTimelinePlay;
+    private bool _phantomPauseLogged;
+    private bool _ignoredStickLogged;
+    private bool _stickReleaseSeen;
+    private float _stickAcceptAfter = -1f;
+    private int _trackedDeviceIndex = int.MinValue;
+    private string _lockReason = "startup";
     private bool _timelineControlStickAdjusting;
     private bool _timelineControlStickDirty;
     private float _timelineFovStickValue = VRTimelineService.DefaultCameraFov;
@@ -75,8 +87,7 @@ internal sealed class VRTimelineCameraFollowController : MonoBehaviour
     {
         get
         {
-            return _instance != null
-                && _instance.QueryTimelineCameraWriterActive();
+            return false;
         }
     }
 
@@ -90,8 +101,7 @@ internal sealed class VRTimelineCameraFollowController : MonoBehaviour
     {
         get
         {
-            return _sceneTransitionActive
-                || (_instance != null && _instance.IsManualMovementLockedNow());
+            return _sceneTransitionActive;
         }
     }
 
@@ -104,22 +114,11 @@ internal sealed class VRTimelineCameraFollowController : MonoBehaviour
     {
         get
         {
-            if (VRTimelineService.IsSceneMutationActive)
-                return true;
-            if (_instance == null)
-                return false;
-            _instance.ResolveSettings();
-            if (_instance._settings == null
-                || !_instance._settings.TimelineFollowCamera)
-                return false;
-            bool isPlaying;
-            return VRTimelineService.TryGetIsPlaying(out isPlaying) && isPlaying;
+            return false;
         }
     }
 
-    internal static bool ConsumedRightStickTransportThisFrame =>
-        _instance != null
-        && _instance._rightStickTransportConsumedFrame == Time.frameCount;
+    internal static bool ConsumedRightStickTransportThisFrame => false;
 
     /// <summary>
     /// The dedicated Timeline page is an explicit transport context. When its
@@ -130,12 +129,7 @@ internal sealed class VRTimelineCameraFollowController : MonoBehaviour
     {
         get
         {
-            if (VRTimelineService.IsSceneMutationActive)
-                return true;
-            bool isPlaying;
-            bool available = VRTimelineService.TryGetIsPlaying(out isPlaying);
-            return VRWristMenuController.IsTimelinePageOpen
-                || available;
+            return false;
         }
     }
 
@@ -143,26 +137,25 @@ internal sealed class VRTimelineCameraFollowController : MonoBehaviour
     {
         get
         {
-            if (_instance == null)
-                return false;
-            _instance.ResolveSettings();
-            bool isPlaying;
-            return _instance._settings != null
-                && _instance._settings.TimelineFollowCamera
-                && VRTimelineService.TryGetIsPlaying(out isPlaying)
-                && isPlaying;
+            return false;
         }
+    }
+
+    internal static void RenewMmdCameraLock()
+    {
+        if (_instance != null)
+            _instance.RenewExternalOwner(false);
+    }
+
+    internal static void ReleaseMmdCameraLock()
+    {
+        if (_instance != null)
+            _instance.SetExternalVrCameraOwner(false, true);
     }
 
     internal static bool TryHandleRightStickPlaybackToggle()
     {
-        if (VRTimelineService.IsSceneMutationActive)
-        {
-            if (_instance != null)
-                _instance._rightStickTransportConsumedFrame = Time.frameCount;
-            return true;
-        }
-        return _instance != null && _instance.HandleRightStickPlaybackToggle();
+        return false;
     }
 
     internal static void BeginSceneTransition(int generation)
@@ -178,6 +171,9 @@ internal sealed class VRTimelineCameraFollowController : MonoBehaviour
         }
         GripMoveKKCharaStudioTool.CancelAllTimelineLockedInteraction();
         VRTwoHandScale.CancelTimelineInteraction();
+        VRLog.Info(
+            "Manual VR origin movement locked. reason=scene-transition generation="
+            + generation);
     }
 
     internal static void CompleteSceneTransition(int generation)
@@ -193,6 +189,9 @@ internal sealed class VRTimelineCameraFollowController : MonoBehaviour
         }
         GripMoveKKCharaStudioTool.CancelAllTimelineLockedInteraction();
         VRTwoHandScale.CancelTimelineInteraction();
+        VRLog.Info(
+            "Manual VR origin movement unlocked. reason=scene-transition-complete generation="
+            + generation);
     }
 
     private void Awake()
@@ -203,6 +202,9 @@ internal sealed class VRTimelineCameraFollowController : MonoBehaviour
 
     private void Update()
     {
+        ObserveStickSettle();
+        if (VRTimelineService.TransportFrame == Time.frameCount)
+            _trustedTimelinePlay = true;
         RefreshTimelinePlaybackLock(true);
         UpdateTimelineTransportInput();
         UpdateTimelineCompositionInput();
@@ -238,20 +240,13 @@ internal sealed class VRTimelineCameraFollowController : MonoBehaviour
     {
         if (_instance == null)
             return false;
-        _instance.ApplyCurrentMode(true);
-        _instance.ApplyTimelineCompositionOverride(true);
-        _instance.ApplyTimelinePoseOffsetOverride(true);
         _instance.ApplyExternalMmdCameraOwnership(true);
         return _instance.TryResolveCameraSyncDriver(true);
     }
 
     internal static bool ApplyTimelineCompositionNow()
     {
-        if (_instance == null)
-            return false;
-        bool compositionApplied = _instance.ApplyTimelineCompositionOverride(true);
-        bool poseApplied = _instance.ApplyTimelinePoseOffsetOverride(true);
-        return compositionApplied && poseApplied;
+        return false;
     }
 
     private void ResolveSettings()
@@ -268,6 +263,9 @@ internal sealed class VRTimelineCameraFollowController : MonoBehaviour
     /// </summary>
     private void UpdateTimelineTransportInput()
     {
+        if (VRTimelineService.TimelineDisabled)
+            return;
+
         SteamVR_Controller.Device right = GetDevice(VR.Mode?.Right);
         if (right == null)
             return;
@@ -284,6 +282,12 @@ internal sealed class VRTimelineCameraFollowController : MonoBehaviour
 
     private void UpdateTimelineCompositionInput()
     {
+        if (VRTimelineService.TimelineDisabled)
+        {
+            FinishTimelineControlInput();
+            return;
+        }
+
         ResolveSettings();
         bool timelinePlaying;
         bool canAdjust = !_sceneTransitionActive
@@ -448,6 +452,31 @@ internal sealed class VRTimelineCameraFollowController : MonoBehaviour
         if (_rightStickTransportConsumedFrame == Time.frameCount)
             return true;
 
+        // KKS reports Axis0 stateDown once when the pose action first connects
+        // and again while VRGIN cycles the tool. Timeline 1.1.8's Play() turns
+        // that edge into isPlaying, which then locks locomotion with no tracks
+        // running. Ignore those edges until the stick has been seen released.
+        if (!IsStickInputSettled())
+        {
+            if (!_ignoredStickLogged)
+            {
+                _ignoredStickLogged = true;
+                VRLog.Info(
+                    "Timeline stick click ignored until controller input settles. reason=connect-time-axis0");
+            }
+            _rightStickTransportConsumedFrame = Time.frameCount;
+            return true;
+        }
+
+        SteamVR_Controller.Device right = RightStickDevice();
+        if (right == null || !right.GetPress(EVRButtonId.k_EButton_Axis0))
+        {
+            // OpenXR can report stateDown on the frame an action binds while
+            // state itself is still false. That is not a stick click.
+            _rightStickTransportConsumedFrame = Time.frameCount;
+            return true;
+        }
+
         if (VRTimelineService.IsSceneMutationActive)
         {
             _rightStickTransportConsumedFrame = Time.frameCount;
@@ -496,31 +525,118 @@ internal sealed class VRTimelineCameraFollowController : MonoBehaviour
 
     private void RefreshTimelinePlaybackLock(bool cancelInteractionsOnStart)
     {
+        if (VRTimelineService.TimelineDisabled)
+            return;
+
         ResolveSettings();
+        if (VRTimelineService.TransportFrame == Time.frameCount)
+            _trustedTimelinePlay = true;
+
         bool locked = false;
         bool stateAvailable = false;
+        string reason = "timeline-state-unavailable";
         bool isPlaying;
-        if (_settings != null && _settings.TimelineFollowCamera
-            && VRTimelineService.TryGetIsPlaying(out isPlaying))
+        bool available = VRTimelineService.TryGetIsPlaying(out isPlaying);
+        if (available && !isPlaying)
+            _sawTimelineStopped = true;
+
+        // A connect-time Play() leaves isPlaying true with nothing on the
+        // timeline. Pause it before CameraSync's late update can grab the
+        // origin. A desktop play that was already running is left alone.
+        bool phantom = available
+            && isPlaying
+            && _sawTimelineStopped
+            && !_trustedTimelinePlay
+            && !IsStickInputSettled();
+        if (phantom)
+        {
+            bool wasPlaying;
+            VRTimelineService.PauseIfPlaying(out wasPlaying);
+            if (!_phantomPauseLogged)
+            {
+                _phantomPauseLogged = true;
+                VRLog.Info(
+                    "Timeline isPlaying became true during controller settle without a play command; paused it. reason=connect-time-playback-flag");
+            }
+            isPlaying = false;
+            reason = "phantom-playback-paused";
+        }
+
+        if (_settings == null || !_settings.TimelineFollowCamera)
+            reason = "camera-follow-disabled";
+        else if (available)
         {
             stateAvailable = true;
             locked = isPlaying;
+            reason = isPlaying ? "timeline-isPlaying" : "timeline-stopped";
         }
 
-        bool started = locked
-            && (!_timelinePlaybackLockKnown || !_timelinePlaybackLocked);
+        bool wasLocked = _timelinePlaybackLocked;
+        bool becameLocked = locked && !wasLocked;
+        bool becameUnlocked = !locked && wasLocked && _timelinePlaybackLockKnown;
         _timelinePlaybackLocked = locked;
         _timelinePlaybackLockKnown = stateAvailable;
-        if (started && cancelInteractionsOnStart)
+        _lockReason = reason;
+        if (becameLocked && cancelInteractionsOnStart)
         {
             GripMoveKKCharaStudioTool.CancelAllTimelineLockedInteraction();
             VRTwoHandScale.CancelTimelineInteraction();
-            VRLog.Info("Timeline camera playback locked manual VR origin movement.");
         }
+        if (becameLocked)
+        {
+            VRLog.Info(
+                "Timeline camera playback locked manual VR origin movement. reason="
+                + reason);
+        }
+        else if (becameUnlocked)
+        {
+            VRLog.Info(
+                "Timeline camera playback unlocked manual VR origin movement. reason="
+                + reason);
+        }
+    }
+
+    private void ObserveStickSettle()
+    {
+        SteamVR_Controller.Device right = RightStickDevice();
+        if (right == null || !right.connected)
+            return;
+
+        int index = VRGameCompatibility.DeviceIndex(VR.Mode != null ? VR.Mode.Right : null);
+        if (_stickAcceptAfter < 0f || index != _trackedDeviceIndex)
+        {
+            // The first published index starts the quarantine. Later index
+            // publication of the same connect must not extend it forever.
+            if (_stickAcceptAfter < 0f)
+                _stickAcceptAfter = Time.unscaledTime + StickSettleSeconds;
+            _trackedDeviceIndex = index;
+        }
+        if (!right.GetPress(EVRButtonId.k_EButton_Axis0))
+            _stickReleaseSeen = true;
+    }
+
+    private bool IsStickInputSettled()
+    {
+        ObserveStickSettle();
+        return _stickAcceptAfter >= 0f
+            && Time.unscaledTime >= _stickAcceptAfter
+            && _stickReleaseSeen;
+    }
+
+    private static SteamVR_Controller.Device RightStickDevice()
+    {
+#if KKS
+        return SteamVR_Controller.ForController(VR.Mode != null ? VR.Mode.Right : null);
+#else
+        return GetDevice(VR.Mode != null ? VR.Mode.Right : null);
+#endif
     }
 
     private void ApplyCurrentMode(bool forceResolve)
     {
+        if (VRTimelineService.TimelineDisabled)
+            return;
+
         ResolveSettings();
 
         bool isPlaying;
@@ -678,6 +794,24 @@ internal sealed class VRTimelineCameraFollowController : MonoBehaviour
             _isTimelineCameraWriterActiveMethod = driver.GetType().GetMethod(
                 "IsTimelineCameraWriterActive",
                 instanceFlags);
+            _isTimelineCameraWriterActive = null;
+            if (_isTimelineCameraWriterActiveMethod != null)
+            {
+                try
+                {
+                    // Property/method invoke boxes the bool on every LateUpdate.
+                    // Internal methods in another assembly can refuse the delegate;
+                    // Invoke remains the fallback.
+                    _isTimelineCameraWriterActive = (Func<bool>)Delegate.CreateDelegate(
+                        typeof(Func<bool>),
+                        driver,
+                        _isTimelineCameraWriterActiveMethod);
+                }
+                catch (ArgumentException)
+                {
+                    _isTimelineCameraWriterActive = null;
+                }
+            }
             _timelineSuppressionStateKnown = false;
             _timelineCompositionStateKnown = false;
             _timelinePoseOffsetStateKnown = false;
@@ -705,6 +839,7 @@ internal sealed class VRTimelineCameraFollowController : MonoBehaviour
         _clearTimelineUserPoseOffsetMethod = null;
         _setExternalVrCameraOwnerMethod = null;
         _isTimelineCameraWriterActiveMethod = null;
+        _isTimelineCameraWriterActive = null;
         _timelineSuppressionStateKnown = false;
         _timelineCompositionStateKnown = false;
         _timelinePoseOffsetStateKnown = false;
@@ -742,6 +877,9 @@ internal sealed class VRTimelineCameraFollowController : MonoBehaviour
 
     private bool ApplyTimelineCompositionOverride(bool forceResolve)
     {
+        if (VRTimelineService.TimelineDisabled)
+            return false;
+
         ResolveSettings();
         bool enabled = !_sceneTransitionActive
             && _settings != null
@@ -786,6 +924,9 @@ internal sealed class VRTimelineCameraFollowController : MonoBehaviour
 
     private bool ApplyTimelinePoseOffsetOverride(bool forceResolve)
     {
+        if (VRTimelineService.TimelineDisabled)
+            return false;
+
         ResolveSettings();
         float verticalOffset = _settings == null
             ? 0f
@@ -828,17 +969,47 @@ internal sealed class VRTimelineCameraFollowController : MonoBehaviour
     private void ApplyExternalMmdCameraOwnership(bool forceResolve)
     {
         bool freshPlaybackReport = VRMmddStateBridge.PlaybackReported
-            && Time.realtimeSinceStartup - VRMmddStateBridge.PlaybackReportRealtime <= 1f;
+            && Time.realtimeSinceStartup - VRMmddStateBridge.PlaybackReportRealtime <= 2.5f;
         bool active = !_sceneTransitionActive
-            && freshPlaybackReport
-            && VRMmddStateBridge.PlaybackAvailable
+            && (freshPlaybackReport || VRMmddStateBridge.PlaybackIsPlaying)
             && VRMmddStateBridge.PlaybackIsPlaying
             && VRMmddStateBridge.DirectVrCameraOwner;
-        SetExternalVrCameraOwner(active, forceResolve);
+        if (active)
+        {
+            // Renew every frame. The driver drops the lock if this stops,
+            // so a disabled follow controller cannot pin the camera.
+            RenewExternalOwner(forceResolve);
+            return;
+        }
+        SetExternalVrCameraOwner(false, forceResolve);
+    }
+
+    private void RenewExternalOwner(bool forceResolve)
+    {
+        if (!TryResolveCameraSyncDriver(forceResolve)
+            || _setExternalVrCameraOwnerMethod == null)
+        {
+            return;
+        }
+
+        try
+        {
+            _setExternalVrCameraOwnerMethod.Invoke(_cameraSyncDriver, ExternalOwnerOn);
+            _externalCameraOwnerApplied = true;
+            _externalCameraOwnerStateKnown = true;
+        }
+        catch (Exception exception)
+        {
+            ClearCameraSyncDriver();
+            VRLog.Warn("Unable to renew the MMDD VR camera lease: " + exception.Message);
+        }
     }
 
     private bool QueryTimelineCameraWriterActive()
     {
+        if (VRTimelineService.TimelineDisabled)
+            return false;
+
         if (_sceneTransitionActive
             || !TryResolveCameraSyncDriver(false)
             || _isTimelineCameraWriterActiveMethod == null)
@@ -848,6 +1019,8 @@ internal sealed class VRTimelineCameraFollowController : MonoBehaviour
 
         try
         {
+            if (_isTimelineCameraWriterActive != null)
+                return _isTimelineCameraWriterActive();
             object result = _isTimelineCameraWriterActiveMethod.Invoke(
                 _cameraSyncDriver,
                 null);
@@ -879,7 +1052,7 @@ internal sealed class VRTimelineCameraFollowController : MonoBehaviour
         {
             _setExternalVrCameraOwnerMethod.Invoke(
                 _cameraSyncDriver,
-                new object[] { active });
+                active ? ExternalOwnerOn : ExternalOwnerOff);
             _externalCameraOwnerApplied = active;
             _externalCameraOwnerStateKnown = true;
         }
@@ -902,7 +1075,7 @@ internal sealed class VRTimelineCameraFollowController : MonoBehaviour
             if (_clearTimelineUserPoseOffsetMethod != null)
                 _clearTimelineUserPoseOffsetMethod.Invoke(_cameraSyncDriver, null);
             if (_setExternalVrCameraOwnerMethod != null)
-                _setExternalVrCameraOwnerMethod.Invoke(_cameraSyncDriver, new object[] { false });
+                _setExternalVrCameraOwnerMethod.Invoke(_cameraSyncDriver, ExternalOwnerOff);
         }
         catch (Exception exception)
         {

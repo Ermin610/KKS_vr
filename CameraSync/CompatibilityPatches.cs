@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Reflection;
 using HarmonyLib;
 using Studio;
@@ -105,9 +106,83 @@ namespace KK_VR_CameraSync
         [HarmonyPostfix]
         private static void Postfix(bool __result)
         {
+            // LoadScene returning true only means Studio accepted the request.
+            // Completing here used to resume CameraSync while LoadSceneCoroutine
+            // was still destroying/creating objects and could hang the session.
+            if (__result)
+                return;
+
             Plugin plugin = Plugin.Instance;
             if (plugin != null && plugin.Driver != null)
-                plugin.Driver.CompleteNativeSceneLoad(__result);
+                plugin.Driver.CompleteNativeSceneLoad(false);
+        }
+    }
+
+    [HarmonyPatch(
+        typeof(Studio.Studio),
+        "LoadSceneCoroutine",
+        new Type[] { typeof(string) },
+        null)]
+    internal static class NativeLoadSceneCoroutinePatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix(ref IEnumerator __result)
+        {
+            __result = ObserveLoadSceneCoroutine(__result);
+        }
+
+        private static IEnumerator ObserveLoadSceneCoroutine(IEnumerator inner)
+        {
+            bool completed = false;
+            Exception failure = null;
+            try
+            {
+                while (inner != null)
+                {
+                    bool moved = false;
+                    object current = null;
+                    try
+                    {
+                        moved = inner.MoveNext();
+                        if (moved)
+                            current = inner.Current;
+                    }
+                    catch (Exception ex)
+                    {
+                        failure = ex;
+                    }
+
+                    if (failure != null || !moved)
+                    {
+                        completed = failure == null;
+                        break;
+                    }
+
+                    yield return current;
+                }
+            }
+            finally
+            {
+                IDisposable disposable = inner as IDisposable;
+                if (disposable != null)
+                {
+                    try
+                    {
+                        disposable.Dispose();
+                    }
+                    catch
+                    {
+                        // Enumerator cleanup must not hide the load outcome.
+                    }
+                }
+
+                Plugin plugin = Plugin.Instance;
+                if (plugin != null && plugin.Driver != null)
+                    plugin.Driver.CompleteNativeSceneLoad(completed);
+            }
+
+            if (failure != null)
+                throw failure;
         }
     }
 

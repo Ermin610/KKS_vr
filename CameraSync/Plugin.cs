@@ -176,6 +176,7 @@ namespace KK_VR_CameraSync
             {
                 _harmony = new Harmony(Guid);
                 _harmony.PatchAll(typeof(NativeLoadScenePatch));
+                _harmony.PatchAll(typeof(NativeLoadSceneCoroutinePatch));
                 _harmony.PatchAll(typeof(NativeImportScenePatch));
                 TryInstallCameraHelperPatches();
             }

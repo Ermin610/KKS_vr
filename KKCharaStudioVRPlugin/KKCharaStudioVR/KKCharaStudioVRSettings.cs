@@ -149,8 +149,69 @@ public class KKCharaStudioVRSettings : VRSettings
 		set { _ProximityGrabRadius = value; TriggerPropertyChanged("ProximityGrabRadius"); }
 	}
 
-	private float _UISpawnDistance = 2.0f;
-	private float _UISpawnScale = 1.0f;
+	private bool _PhysicalUndresserEnabled = true;
+	private float _PhysicalUndresserPullDistance = 0.13f;
+	private float _PhysicalUndresserSFXVolume = 1.0f;
+
+	[XmlComment("Enable physical hand-tearing of clothes")]
+	public bool PhysicalUndresserEnabled
+	{
+		get { return _PhysicalUndresserEnabled; }
+		set { _PhysicalUndresserEnabled = value; TriggerPropertyChanged("PhysicalUndresserEnabled"); }
+	}
+
+	[XmlComment("Pull distance threshold for tearing clothes (meters)")]
+	public float PhysicalUndresserPullDistance
+	{
+		get { return _PhysicalUndresserPullDistance; }
+		set { _PhysicalUndresserPullDistance = value; TriggerPropertyChanged("PhysicalUndresserPullDistance"); }
+	}
+
+	[XmlComment("Sound effect volume for physical undresser (0.0 to 1.0)")]
+	public float PhysicalUndresserSFXVolume
+	{
+		get { return _PhysicalUndresserSFXVolume; }
+		set { _PhysicalUndresserSFXVolume = value; TriggerPropertyChanged("PhysicalUndresserSFXVolume"); }
+	}
+
+	private bool _DynamicTouchEnabled = true;
+	private bool _PhysicalUndressEnabled = true;
+	private bool _FigurePosingMode;
+	private bool _IkGuideVisible = true;
+
+	[XmlComment("Chest and hip kneading, petting, and slaps. Independent of physical undress and IK guide visibility.")]
+	public bool DynamicTouchEnabled
+	{
+		get { return _DynamicTouchEnabled; }
+		set { _DynamicTouchEnabled = value; TriggerPropertyChanged("DynamicTouchEnabled"); }
+	}
+
+	[XmlComment("Pull clothes off by hand. Independent of kneading; off means grabs never remove clothes.")]
+	public bool PhysicalUndressEnabled
+	{
+		get { return _PhysicalUndressEnabled; }
+		set { _PhysicalUndressEnabled = value; TriggerPropertyChanged("PhysicalUndressEnabled"); }
+	}
+
+	[XmlComment("Keep the released IK pose instead of springing soft tissue back.")]
+	public bool FigurePosingMode
+	{
+		get { return _FigurePosingMode; }
+		set { _FigurePosingMode = value; TriggerPropertyChanged("FigurePosingMode"); }
+	}
+
+	[XmlComment("Draw IK guide spheres. Colliders stay active when this is off.")]
+	public bool IkGuideVisible
+	{
+		get { return _IkGuideVisible; }
+		set { _IkGuideVisible = value; TriggerPropertyChanged("IkGuideVisible"); }
+	}
+
+	public const float DefaultUISpawnDistance = 0.38f;
+	public const float DefaultUISpawnScale = 0.4f;
+
+	private float _UISpawnDistance = DefaultUISpawnDistance;
+	private float _UISpawnScale = DefaultUISpawnScale;
 	private string _ControllerFaceButtonLayout = ControllerLayoutSplitHands;
 	private bool _TimelineFollowCamera = true;
 
@@ -168,10 +229,41 @@ public class KKCharaStudioVRSettings : VRSettings
 		set { _UISpawnScale = value; TriggerPropertyChanged("UISpawnScale"); }
 	}
 
+	public const float DefaultCharSpawnDistance = 1.5f;
+
+	private bool _AutoPlaceNewCharInFront = false;
+	private float _CharSpawnDistance = DefaultCharSpawnDistance;
+	private bool _AutoPlaceNewItemInFront = false;
+
+	[XmlComment("Automatically place newly added characters in front of the VR player facing the player")]
+	public bool AutoPlaceNewCharInFront
+	{
+		get { return _AutoPlaceNewCharInFront; }
+		set { _AutoPlaceNewCharInFront = value; TriggerPropertyChanged("AutoPlaceNewCharInFront"); }
+	}
+
+	[XmlComment("Distance in front of head when characters spawn or are called (meters)")]
+	public float CharSpawnDistance
+	{
+		get { return _CharSpawnDistance; }
+		set
+		{
+			_CharSpawnDistance = System.Math.Max(0.5f, System.Math.Min(5.0f, value));
+			TriggerPropertyChanged("CharSpawnDistance");
+		}
+	}
+
+	[XmlComment("Automatically place newly added items/props in front of the VR player")]
+	public bool AutoPlaceNewItemInFront
+	{
+		get { return _AutoPlaceNewItemInFront; }
+		set { _AutoPlaceNewItemInFront = value; TriggerPropertyChanged("AutoPlaceNewItemInFront"); }
+	}
+
 	[XmlComment("Face button layout: split-hands, left-hand, or right-hand")]
 	public string ControllerFaceButtonLayout
 	{
-		get { return _ControllerFaceButtonLayout; }
+		get { return NormalizeControllerFaceButtonLayout(_ControllerFaceButtonLayout); }
 		set
 		{
 			_ControllerFaceButtonLayout = NormalizeControllerFaceButtonLayout(value);
@@ -463,7 +555,25 @@ public class KKCharaStudioVRSettings : VRSettings
 
 	public static KKCharaStudioVRSettings Load(string path)
 	{
-		return VRSettings.Load<KKCharaStudioVRSettings>(path);
+		KKCharaStudioVRSettings settings = VRSettings.Load<KKCharaStudioVRSettings>(path);
+		if (settings != null)
+			settings.MigrateOversizedMainUi();
+		return settings;
+	}
+
+	// 0.7 m at 1.35x put the studio panel against the headset. That pair was
+	// the previous default and is still stored in existing settings files.
+	private void MigrateOversizedMainUi()
+	{
+		if ((System.Math.Abs(_UISpawnDistance - 0.7f) < 0.001f && System.Math.Abs(_UISpawnScale - 1.35f) < 0.001f)
+			|| (System.Math.Abs(_UISpawnDistance - 1.2f) < 0.001f && System.Math.Abs(_UISpawnScale - 1.0f) < 0.001f))
+		{
+			_UISpawnDistance = DefaultUISpawnDistance;
+			_UISpawnScale = DefaultUISpawnScale;
+			VRLog.Info("Main UI spawn reset to "
+				+ DefaultUISpawnDistance.ToString("F2") + "m/"
+				+ DefaultUISpawnScale.ToString("F2") + "x.");
+		}
 	}
 
 	private static string NormalizeWristMenuLanguage(string value)

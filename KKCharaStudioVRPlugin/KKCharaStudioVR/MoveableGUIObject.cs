@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using Studio;
 using UnityEngine;
+using VRGIN.Core;
 using Object = UnityEngine.Object;
 
 namespace KKCharaStudioVR;
@@ -30,9 +31,12 @@ public class MoveableGUIObject : MonoBehaviour
 
 	public Renderer visibleReference;
 
+	private SphereCollider[] _spheres;
+
 	private void Start()
 	{
 		renderer = ((Component)this).GetComponent<Renderer>();
+		_spheres = ((Component)this).GetComponents<SphereCollider>();
 	}
 
 	public void OnMoveStart()
@@ -43,7 +47,7 @@ public class MoveableGUIObject : MonoBehaviour
 		//IL_0035: Unknown result type (might be due to invalid IL or missing references)
 		//IL_0046: Unknown result type (might be due to invalid IL or missing references)
 		//IL_004b: Unknown result type (might be due to invalid IL or missing references)
-		if (guideObject != null)
+		if (guideObject != null && guideObject.changeAmount != null)
 		{
 			oldPos = guideObject.changeAmount.pos;
 			oldRot = guideObject.changeAmount.rot;
@@ -100,7 +104,31 @@ public class MoveableGUIObject : MonoBehaviour
 		//IL_00ca: Expected O, but got Unknown
 		//IL_00d9: Unknown result type (might be due to invalid IL or missing references)
 		//IL_00e3: Expected O, but got Unknown
-		if (guideObject != null)
+		// A guide whose character was deleted mid-grab has no change amount or
+		// undo manager any more. The release listeners below must still run.
+		try
+		{
+			PushUndoCommands();
+		}
+		catch (Exception ex)
+		{
+			VRLog.Warn("Guide release undo skipped: " + ex.Message);
+		}
+		foreach (Action<MonoBehaviour> item in onReleasedLister)
+		{
+			try
+			{
+				item((MonoBehaviour)(object)this);
+			}
+			catch
+			{
+			}
+		}
+	}
+
+	private void PushUndoCommands()
+	{
+		if (guideObject != null && guideObject.changeAmount != null && Singleton<UndoRedoManager>.Instance != null)
 		{
 			if (guideScale == null)
 			{
@@ -139,16 +167,6 @@ public class MoveableGUIObject : MonoBehaviour
 				Singleton<UndoRedoManager>.Instance.Push((ICommand)new GuideCommand.ScaleEqualsCommand(array));
 			}
 		}
-		foreach (Action<MonoBehaviour> item in onReleasedLister)
-		{
-			try
-			{
-				item((MonoBehaviour)(object)this);
-			}
-			catch
-			{
-			}
-		}
 	}
 
 	private void Update()
@@ -159,17 +177,59 @@ public class MoveableGUIObject : MonoBehaviour
 		//IL_0045: Unknown result type (might be due to invalid IL or missing references)
 		//IL_004f: Unknown result type (might be due to invalid IL or missing references)
 		//IL_005e: Unknown result type (might be due to invalid IL or missing references)
+		// optionSystem is a static that can be unset while Studio is loading or shutting down.
+		float manipulateSize = Studio.Studio.optionSystem != null ? Studio.Studio.optionSystem.manipulateSize : 1f;
 		if (isMoveObj)
 		{
-			((Component)this).transform.localScale = Vector3.one * 0.1f * Studio.Studio.optionSystem.manipulateSize;
+			((Component)this).transform.localScale = Vector3.one * 0.1f * manipulateSize;
 		}
 		if (guideScale != null)
 		{
-			((Component)this).transform.localScale = Vector3.one * 0.05f * Studio.Studio.optionSystem.manipulateSize;
+			((Component)this).transform.localScale = Vector3.one * 0.05f * manipulateSize;
+		}
+		FitGrabCollider();
+		if (guideObject != null)
+		{
+			bool show = VRStudioInteractionPolicy.GuideRendererEnabled(
+				VRStudioInteractionPolicy.IkRendererEnabled(VRQuickActions.ikVisible),
+				guideObject.visible,
+				guideObject.visibleOutside);
+			if (renderer != null)
+				renderer.enabled = show;
+			// visibleReference is the guide's own green ball (or its XYZ arrow).
+			// It is what the player actually sees, so the switch has to reach it.
+			if (visibleReference != null)
+				visibleReference.enabled = show;
+			if (_spheres != null)
+			{
+				bool colliders = VRStudioInteractionPolicy.IkColliderEnabled(VRQuickActions.ikVisible);
+				for (int i = 0; i < _spheres.Length; i++)
+				{
+					if (_spheres[i] != null)
+						_spheres[i].enabled = colliders;
+				}
+			}
 		}
 		if (visibleReference != null && renderer != null)
 		{
 			((Component)renderer).gameObject.layer = ((Component)visibleReference).gameObject.layer;
+		}
+	}
+
+	private void FitGrabCollider()
+	{
+		if (guideObject == null || _spheres == null || _spheres.Length == 0) return;
+		float lossy = Mathf.Abs(((Component)this).transform.lossyScale.x);
+		if (lossy < 0.0001f) return;
+		// Keep the trigger near the visible handle. A default radius of 0.5
+		// swallows neighboring bones when the guide is not scaled down.
+		float worldRadius = isMoveObj ? 0.05f : 0.022f;
+		float radius = worldRadius / lossy;
+		for (int i = 0; i < _spheres.Length; i++)
+		{
+			SphereCollider sphere = _spheres[i];
+			if (sphere != null && Mathf.Abs(sphere.radius - radius) > 0.001f)
+				sphere.radius = radius;
 		}
 	}
 }

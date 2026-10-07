@@ -54,7 +54,7 @@ public sealed partial class VRWristMenuController
     private Text _mmdFovSpeedText;
     private VRWristMenuButtonTarget _characterLightToggle;
     private VRWristMenuButtonTarget _characterLightShadowToggle;
-    private const int ReShadePresetRowsPerPage = 3;
+    private const int ReShadePresetRowsPerPage = 4;
     private VRWristMenuButtonTarget _reshadeToggleButton;
     private VRWristMenuButtonTarget _reshadePresetDropdownButton;
     private GameObject _reshadePresetDropdownPanel;
@@ -330,9 +330,9 @@ public sealed partial class VRWristMenuController
         CreateText(
             "MmdPresentationHideHint", _settingsMmdPanel.transform,
             L(
-                "隐藏后：左摇杆播放/暂停；右摇杆上下调 FOV、左右线性旋转；右 A 复位。",
-                "非表示中：左スティックで再生/停止、右スティックで FOV/回転、右 A でリセット。",
-                "Hidden: left-stick click plays/pauses; right stick adjusts FOV/yaw; right A resets."),
+                "隐藏后：按下摇杆播放/暂停；右摇杆上下调 FOV、左右线性旋转；右 A 复位。",
+                "非表示中：スティック押下で再生/停止、右スティックで FOV/回転、右 A でリセット。",
+                "Hidden: stick click plays/pauses; right stick adjusts FOV/yaw; right A resets."),
             36f, 226f, 488f, 36f, 14,
             TextAnchor.MiddleLeft, TertiaryTextColor);
 
@@ -713,7 +713,7 @@ public sealed partial class VRWristMenuController
             196f,
             258f,
             340f,
-            148f,
+            184f,
             _visibleLayer);
         Image background = CreateImage(
             "ReShadePresetDropdownBackground",
@@ -721,7 +721,7 @@ public sealed partial class VRWristMenuController
             0f,
             0f,
             340f,
-            148f,
+            184f,
             new Color(0.035f, 0.045f, 0.065f, 0.98f));
         ApplyGlassEffects(background, new Color(0.78f, 0.52f, 1f, 0.28f), true, 3f);
 
@@ -746,7 +746,7 @@ public sealed partial class VRWristMenuController
             "ReShadePresetPrevious",
             "‹",
             6f,
-            116f,
+            152f,
             new Color(0.08f, 0.1f, 0.14f, 0.96f),
             new Color(0.34f, 0.16f, 0.46f, 0.98f),
             () => HandleChangeReShadePresetPage(-1),
@@ -759,7 +759,7 @@ public sealed partial class VRWristMenuController
             _reshadePresetDropdownPanel.transform,
             "1 / 1",
             68f,
-            116f,
+            152f,
             204f,
             26f,
             13,
@@ -769,7 +769,7 @@ public sealed partial class VRWristMenuController
             "ReShadePresetNext",
             "›",
             280f,
-            116f,
+            152f,
             new Color(0.08f, 0.1f, 0.14f, 0.96f),
             new Color(0.34f, 0.16f, 0.46f, 0.98f),
             () => HandleChangeReShadePresetPage(1),
@@ -1138,7 +1138,7 @@ public sealed partial class VRWristMenuController
         bool isPlaying;
         if (!VRTimelineService.TryGetIsPlaying(out isPlaying))
         {
-            _timelineButton.SetLabel(L("时间轴\n不可用", "タイムライン\n利用不可", "Timeline\nUnavailable"));
+            _timelineButton.SetLabel(L("时间轴\n已禁用", "タイムライン\n無効", "Timeline\nDisabled"));
             return;
         }
         _timelineButton.SetLabel(
@@ -1415,7 +1415,10 @@ public sealed partial class VRWristMenuController
         }
 
         if (_reshadePresetPageText != null)
+        {
             _reshadePresetPageText.text = (_reshadePresetPage + 1) + " / " + pageCount;
+            _reshadePresetPageText.gameObject.SetActive(pageCount > 1);
+        }
         if (_reshadePresetPreviousButton != null)
             _reshadePresetPreviousButton.SetVisible(pageCount > 1);
         if (_reshadePresetNextButton != null)

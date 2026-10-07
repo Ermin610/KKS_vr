@@ -182,108 +182,123 @@ public sealed partial class VRWristMenuController
         CreateText(
             "MmdLoadHeading",
             _mmdPlaybackPage.transform,
-            L("载入与播放", "読込と再生", "Load and play"),
+            L("载入与选曲", "読込と選曲", "Load and Select"),
             24f,
-            60f,
+            50f,
             512f,
-            24f,
-            17,
+            20f,
+            16,
             TextAnchor.MiddleLeft,
             new Color(1f, 0.72f, 0.25f, 1f));
         CreateButton(
             "ToggleMmd",
-            L("MMDD\n播放或暂停", "MMDD\n再生・一時停止", "MMDD\nPlay or pause"),
+            L("MMDD\n播放 / 暂停", "MMDD\n再生・一時停止", "MMDD\nPlay or pause"),
             24f,
-            92f,
+            72f,
             new Color(0.28f, 0.2f, 0.07f, 0.48f),
             new Color(0.55f, 0.36f, 0.1f, 0.74f),
             HandleToggleMmd,
             _mmdPlaybackPage.transform,
             248f,
-            58f,
-            17);
+            46f,
+            16);
+        CreateButton(
+            "OpenMmdDanceSelect",
+            L("★ 智能选舞与评分 ›\n9分置顶 · 分区筛选", "★ 推薦ダンスと評価 ›\n高評価順・カテゴリ", "★ Smart Dance Select ›\nRanked 9★ · Categories"),
+            288f,
+            72f,
+            new Color(0.18f, 0.32f, 0.48f, 0.65f),
+            new Color(0.28f, 0.52f, 0.78f, 0.88f),
+            HandleOpenMmdDance,
+            _mmdPlaybackPage.transform,
+            248f,
+            46f,
+            15);
         _loadVmdButton = CreateButton(
             "LoadVmd",
-            L("VMD\n读取动作", "VMD\nモーション読込", "VMD\nLoad motion"),
-            288f,
-            92f,
+            L("常规目录浏览", "フォルダー参照", "Browse folder"),
+            24f,
+            122f,
             VmdRootMissingColor,
             VmdRootMissingHoverColor,
             HandleLoadVmd,
             _mmdPlaybackPage.transform,
             248f,
-            58f,
-            17);
+            38f,
+            15);
         _vmdRootButton = CreateButton(
             "VmdRoot",
-            L("动作目录\n未设置 · 点击选择", "モーションフォルダー\n未設定・選択", "Motion folder\nNot set · Select"),
-            24f,
-            162f,
+            L("设置动作根目录", "フォルダー設定", "Set motion folder"),
+            288f,
+            122f,
             VmdRootMissingColor,
             VmdRootMissingHoverColor,
             HandleChangeVmdRoot,
             _mmdPlaybackPage.transform,
-            512f,
-            48f,
-            16);
+            248f,
+            38f,
+            15);
+
+        // Quick live rating controls
+        BuildMmdPlaybackRatingControls(_mmdPlaybackPage.transform);
 
         CreateText(
             "MmdMaintenanceHeading",
             _mmdPlaybackPage.transform,
             L("动作维护", "モーション管理", "Motion maintenance"),
             24f,
-            224f,
+            226f,
             512f,
-            24f,
-            17,
+            18f,
+            15,
             TextAnchor.MiddleLeft,
             new Color(1f, 0.72f, 0.25f, 1f));
         CreateButton(
             "MmdReturnToStart",
-            L("回到首帧\n停止并复位当前动作", "先頭フレームへ\n停止して現在の動作を戻す", "Return to first frame\nStop and rewind current motion"),
+            L("回到首帧\n停止并复位动作", "先頭フレームへ\n停止して初期化", "Return to first frame\nRewind motion"),
             24f,
-            256f,
+            248f,
             new Color(0.12f, 0.16f, 0.2f, 0.56f),
             new Color(0.22f, 0.34f, 0.42f, 0.8f),
             HandleMmdReturnToStart,
             _mmdPlaybackPage.transform,
             248f,
-            58f,
+            46f,
             15);
         CreateButton(
             "ClearMmdMotionAndCameras",
-            L("清空动作与镜头\n选中角色 · 需要确认", "モーションとカメラを消去\n選択キャラ・確認あり", "Clear motion and cameras\nSelected character · confirmation"),
+            L("清空动作与镜头\n选中角色 · 需要确认", "モーションとカメラ消去\n選択キャラ・確認あり", "Clear motion and cameras\nSelected character · confirm"),
             288f,
-            256f,
+            248f,
             new Color(0.42f, 0.075f, 0.065f, 0.72f),
             new Color(0.72f, 0.12f, 0.1f, 0.88f),
             HandleRequestClearMmdMotionAndCameras,
             _mmdPlaybackPage.transform,
             248f,
-            58f,
+            46f,
             15);
 
         Image noteBackground = CreateImage(
             "MmdPlaybackNoteBackground",
             _mmdPlaybackPage.transform,
             24f,
-            328f,
+            302f,
             512f,
-            66f,
+            96f,
             new Color(0.7f, 0.84f, 0.94f, 0.065f));
         ApplyGlassEffects(noteBackground, new Color(0.86f, 0.96f, 1f, 0.12f), false, 0f);
         CreateText(
             "MmdPlaybackNote",
             _mmdPlaybackPage.transform,
             L(
-                "新 VMD 载入后会停在首帧。清空操作只处理选中角色的动作和当前 MMDD 镜头。",
-                "新しい VMD は先頭で停止します。消去対象は選択キャラの動作と現在の MMDD カメラです。",
-                "A newly loaded VMD stops at its first frame. Clear only affects the selected character and current MMDD cameras."),
+                "★ 智能选舞支持 1~9 分评级、分区筛选与置顶推荐。\n在播放时可点上方 -1★ / +1★ / ★收藏 实时调分并写回本地 JSON 数据库。\n新载入 VMD 停在首帧；清空操作仅影响当前角色及 MMDD 运镜。",
+                "★ 推薦ダンスは 1~9 点評価、カテゴリ別絞り込み・高得点先頭配置に対応。\n上部の -1★ / +1★ / ★ でリアルタイム評価保存可能。",
+                "★ Smart dance select supports 1-9 ratings, categories, and top-ranking.\nUse -1★ / +1★ / ★ to adjust rating in real-time to JSON."),
             40f,
-            334f,
+            306f,
             480f,
-            54f,
-            14,
+            88f,
+            13,
             TextAnchor.MiddleLeft,
             TertiaryTextColor);
     }
@@ -419,9 +434,9 @@ public sealed partial class VRWristMenuController
             "MmdCameraHint",
             _mmdCameraPage.transform,
             L(
-                "固定视野会写入当前 MMDD 镜头并保持。\n展示模式：右摇杆上下调 FOV，左右线性旋转；\n右手 A 复位 FOV 与方向，左摇杆按下播放/暂停。",
-                "固定視野は現在の MMDD カメラへ保存されます。\n表示モード：右スティック上下で FOV、左右で連続回転。\n右 A で FOV と向きをリセット、左スティック押下で再生/停止。",
-                "Fixed FOV is retained by the current MMDD camera.\nPresentation: right stick Y adjusts FOV; X rotates linearly.\nRight A resets FOV and yaw; left-stick click plays or pauses."),
+                "固定视野会写入当前 MMDD 镜头并保持。\n展示模式：右摇杆上下调 FOV，左右线性旋转；\n右手 A 复位 FOV 与方向，按下摇杆播放/暂停。",
+                "固定視野は現在の MMDD カメラへ保存されます。\n表示モード：右スティック上下で FOV、左右で連続回転。\n右 A で FOV と向きをリセット、スティック押下で再生/停止。",
+                "Fixed FOV is retained by the current MMDD camera.\nPresentation: right stick Y adjusts FOV; X rotates linearly.\nRight A resets FOV and yaw; stick click plays or pauses."),
             40f,
             238f,
             480f,
@@ -674,6 +689,7 @@ public sealed partial class VRWristMenuController
             L("MMD 动作与播放", "MMD モーションと再生", "MMD motion and playback"),
             new Color(1f, 0.72f, 0.25f, 1f),
             0f);
+        RefreshCurrentDanceRatingDisplay();
         ShowPage(WristMenuPage.MmdPlayback);
     }
 
@@ -1069,13 +1085,16 @@ public sealed partial class VRWristMenuController
             ReportMmdResult(false, status);
             return;
         }
-        ReportMmdResult(
-            VRMmddService.AdjustHighHeelsRotation(
-                objectKey,
-                component,
-                delta,
-                out status),
-            status);
+        bool ok = VRMmddService.AdjustHighHeelsRotation(
+            objectKey,
+            component,
+            delta,
+            out status);
+        ReportMmdResult(ok, status);
+        if (ok)
+        {
+            VRMmddService.SaveHighHeelsPreset(objectKey, out _);
+        }
         RefreshHighHeelsVisuals();
     }
 
@@ -1088,9 +1107,12 @@ public sealed partial class VRWristMenuController
             ReportMmdResult(false, status);
             return;
         }
-        ReportMmdResult(
-            VRMmddService.AdjustShoesOffset(objectKey, shoesOn, delta, out status),
-            status);
+        bool ok = VRMmddService.AdjustShoesOffset(objectKey, shoesOn, delta, out status);
+        ReportMmdResult(ok, status);
+        if (ok)
+        {
+            VRMmddService.SaveHighHeelsPreset(objectKey, out _);
+        }
         RefreshHighHeelsVisuals();
     }
 

@@ -244,30 +244,30 @@ public class VRItemObjMoveHelper : MonoBehaviour
 
 	public void MoveAllCharaAndItemsHere(bool keepY = false)
 	{
-		//IL_0019: Unknown result type (might be due to invalid IL or missing references)
-		//IL_001e: Unknown result type (might be due to invalid IL or missing references)
-		//IL_003f: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0044: Unknown result type (might be due to invalid IL or missing references)
-		//IL_004f: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0057: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0058: Unknown result type (might be due to invalid IL or missing references)
-		Vector3 newPos = VR.Camera.Head.TransformPoint(0f, 0f, 0.2f);
-		ObjectCtrlInfo firstObject = helper.GetFirstObject();
-		if (firstObject != null)
-		{
-			helper.moveAlongBasePos = firstObject.guideObject.transformTarget.position;
-			helper.MoveAllCharaAndItemsHere(newPos, keepY);
-			moveAlongBasePos = newPos;
-		}
+		string feedback;
+		VRSpawnPlacementHelper.CallAllCharacters(keepY, out feedback);
 	}
 
 	public void MoveObjectHere(ObjectCtrlInfo oci)
 	{
-		//IL_0019: Unknown result type (might be due to invalid IL or missing references)
-		//IL_001e: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0026: Unknown result type (might be due to invalid IL or missing references)
-		Vector3 newPos = VR.Camera.Head.TransformPoint(0f, 0f, 0.2f);
-		helper.MoveObject(oci, newPos, keepY);
+		if (oci == null) return;
+		float dist = 1.5f;
+		var settings = VR.Manager?.Context?.Settings as KKCharaStudioVRSettings;
+		if (settings != null) dist = settings.CharSpawnDistance;
+
+		if (VRSpawnPlacementHelper.CalculateFrontPlacement(dist, oci is OCIItem, out Vector3 newPos, out Quaternion newRot))
+		{
+			if (keepY && oci.guideObject?.transformTarget != null)
+			{
+				newPos.y = oci.guideObject.transformTarget.position.y;
+			}
+			VRSpawnPlacementHelper.ApplyPlacement(oci, newPos, newRot);
+		}
+		else if (VR.Camera?.Head != null)
+		{
+			Vector3 fallback = VR.Camera.Head.TransformPoint(0f, 0f, 1.2f);
+			helper.MoveObject(oci, fallback, keepY);
+		}
 	}
 
 	public void VRToggleObjectSelectOnCursor()

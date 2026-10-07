@@ -134,6 +134,7 @@ internal class VRLoader : ProtectedBehaviour
 		if (vrMode)
 		{
 			VRManager.Create<KKCharaStudioInterpreter>(CreateContext("KKCSVRContext.xml"));
+			VRGameCompatibility.InstallGameplayCameraGuards();
 			VR.Manager.SetMode<GenericStandingMode>();
 			GameObject val = new GameObject("KKCharaStudioVR");
 			UnityEngine.Object.DontDestroyOnLoad(val);
@@ -151,6 +152,8 @@ internal class VRLoader : ProtectedBehaviour
 			val.AddComponent<VRTimelineCameraFollowController>();
 			val.AddComponent<VRComfortVignette>();
 			val.AddComponent<VRTwoHandScale>(); // Controlled by TwoHandScaleEnabled setting
+			val.AddComponent<VRPhysicalUndresser>();
+			val.AddComponent<VRPhysicsKneadManager>();
 			UnityEngine.Object.DontDestroyOnLoad(((Component)VRCamera.Instance).gameObject);
 		}
 	}

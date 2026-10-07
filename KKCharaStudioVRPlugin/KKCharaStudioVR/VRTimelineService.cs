@@ -15,6 +15,7 @@ internal sealed class VRTimelineMutationSession
 
 internal static class VRTimelineService
 {
+    public static bool TimelineDisabled = true;
     public const float DefaultCameraFov = 53.13f;
     public const float MinCameraFov = 20f;
     public const float MaxCameraFov = 120f;
@@ -28,15 +29,20 @@ internal static class VRTimelineService
     private static FieldInfo _selfField;
     private static MethodInfo _interpolateMethod;
     private static int _sceneMutationDepth;
+    private static bool _sourceLogged;
+    internal static int TransportFrame { get; private set; } = -1;
 
     internal static bool IsSceneMutationActive
     {
-        get { return _sceneMutationDepth > 0; }
+        get { return !TimelineDisabled && _sceneMutationDepth > 0; }
     }
 
     public static bool TryGetIsPlaying(out bool isPlaying)
     {
         isPlaying = false;
+        if (TimelineDisabled)
+            return false;
+
         if (!ResolvePlaybackState())
             return false;
 
@@ -54,6 +60,12 @@ internal static class VRTimelineService
 
     public static bool TogglePlayPause(out string status)
     {
+        if (TimelineDisabled)
+        {
+            status = "Timeline 功能已暂时禁用";
+            return false;
+        }
+
         if (!ResolveControls())
         {
             status = "未检测到 Timeline 1.5.x";
@@ -80,6 +92,7 @@ internal static class VRTimelineService
                 status = "Timeline 开始播放";
             }
 
+            TransportFrame = UnityEngine.Time.frameCount;
             return true;
         }
         catch (Exception exception)
@@ -98,6 +111,9 @@ internal static class VRTimelineService
     public static bool PauseIfPlaying(out bool wasPlaying)
     {
         wasPlaying = false;
+        if (TimelineDisabled)
+            return true;
+
         if (!ResolveControls())
             return false;
 
@@ -129,6 +145,12 @@ internal static class VRTimelineService
         session.OwnsMutationLock = true;
         _sceneMutationDepth++;
         status = null;
+        if (TimelineDisabled)
+        {
+            session.Available = false;
+            session.Completed = true;
+            return true;
+        }
         if (!ResolveControls())
             return true;
 
@@ -168,6 +190,8 @@ internal static class VRTimelineService
         out string status)
     {
         status = null;
+        if (TimelineDisabled)
+            return true;
         if (session == null)
             return true;
         if (session.Completed)
@@ -360,6 +384,12 @@ internal static class VRTimelineService
 
     public static bool RefreshCurrentFrame(out string status)
     {
+        if (TimelineDisabled)
+        {
+            status = "Timeline 功能已暂时禁用";
+            return false;
+        }
+
         if (!ResolvePlaybackState())
         {
             status = "未检测到 Timeline 1.5.x";
@@ -434,6 +464,9 @@ internal static class VRTimelineService
 
     private static bool ResolvePlaybackState()
     {
+        if (TimelineDisabled)
+            return false;
+
         if (_isPlayingProperty != null)
             return true;
 
@@ -456,9 +489,45 @@ internal static class VRTimelineService
         if (_timelineType == null)
             return false;
 
+        _isPlayingProperty = FindStaticBoolProperty(_timelineType, "isPlaying");
+        if (_isPlayingProperty == null)
+        {
+            _timelineType = null;
+            return false;
+        }
+        if (!_sourceLogged)
+        {
+            _sourceLogged = true;
+            string version = _timelineType.Assembly.GetName().Version == null
+                ? ""
+                : " " + _timelineType.Assembly.GetName().Version;
+            VRGIN.Core.VRLog.Info(
+                "Timeline playback source: "
+                + _timelineType.Assembly.GetName().Name
+                + version
+                + " / "
+                + _timelineType.FullName
+                + ".isPlaying");
+        }
+        return true;
+    }
+
+    private static PropertyInfo FindStaticBoolProperty(Type type, string name)
+    {
         const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
-        _isPlayingProperty = _timelineType.GetProperty("isPlaying", flags);
-        return _isPlayingProperty != null;
+        PropertyInfo match = null;
+        foreach (PropertyInfo property in type.GetProperties(flags))
+        {
+            if (property.Name != name || property.PropertyType != typeof(bool))
+                continue;
+            MethodInfo getter = property.GetGetMethod(true);
+            if (getter == null || !getter.IsStatic)
+                continue;
+            if (match != null)
+                return null;
+            match = property;
+        }
+        return match;
     }
 
     private static bool ResolveControls()

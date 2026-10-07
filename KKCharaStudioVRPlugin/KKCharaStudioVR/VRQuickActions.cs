@@ -25,10 +25,14 @@ public class VRQuickActions : MonoBehaviour
     private float _guiTogglePressStarted;
     private bool _presentationSuppressed;
     private readonly Dictionary<GUIQuad, bool> _presentationStates = new Dictionary<GUIQuad, bool>();
+    private string _leftDeviceState;
+    private string _rightDeviceState;
+    private string _gateState;
 
     private void Awake()
     {
         Instance = this;
+        PullIkGuideVisible();
     }
 
     private void OnDestroy()
@@ -40,87 +44,282 @@ public class VRQuickActions : MonoBehaviour
 
     private void Update()
     {
-        if (VR.Mode == null) return;
-        if (_presentationSuppressed)
+        if (VR.Mode == null)
         {
-            SuppressNewPresentationGuiQuads();
+            LogState(ref _gateState, "mode", "Menu input paused: VR.Mode is null");
             return;
         }
-        if (VRMmdPlaybackController.ConsumedPlaybackClickThisFrame
-            || VRTimelineCameraFollowController.ConsumedRightStickTransportThisFrame
-            || VRMmdPlaybackController.BlocksNormalInput)
-            return;
-        var left = VR.Mode.Left;
-        var right = VR.Mode.Right;
 
-        SteamVR_Controller.Device leftController = GetDevice(left);
-        SteamVR_Controller.Device rightController = GetDevice(right);
+        string leftReason;
+        string rightReason;
+        SteamVR_Controller.Device leftController = GetDevice(VR.Mode.Left, out leftReason);
+        SteamVR_Controller.Device rightController = GetDevice(VR.Mode.Right, out rightReason);
+        LogDeviceState(ref _leftDeviceState, "left", leftController, leftReason);
+        LogDeviceState(ref _rightDeviceState, "right", rightController, rightReason);
+
+        KKCharaStudioVRSettings settings = GetSettings();
+        // Playback pause must run before the MMD gate. While a clip is playing
+        // the gate used to return first, so the stick click never reached it.
+        TryToggleMmdFromLeftStick(leftController);
+        string gate = CurrentInputGate();
+        if (gate != null)
+        {
+            _guiTogglePressActive = false;
+            LogState(ref _gateState, gate, "Menu input blocked: " + gate);
+            LogBlockedToggleAttempts(settings, leftController, rightController, gate);
+            if (_presentationSuppressed)
+                SuppressNewPresentationGuiQuads();
+            return;
+        }
+
+        if (_gateState != null)
+        {
+            _gateState = null;
+            VRLog.Info("Menu input unblocked");
+        }
 
         // GUI 显隐按键可使用当前双手布局，或集中到左手 X/Y、右手 A/B。
-        KKCharaStudioVRSettings settings = GetSettings();
         HandleGuiToggleButton(settings, leftController, rightController);
 
-        // 左摇杆按下逻辑分支
+        // 左摇杆按下：普通点击只切换 MMD 播放；Grip 组合才召唤主 GUI。
         if (leftController != null && leftController.GetPressDown(EVRButtonId.k_EButton_Axis0))
         {
             bool isGripPressed = leftController.GetPress(EVRButtonId.k_EButton_Grip);
             bool isTriggerPressed = leftController.GetPress(EVRButtonId.k_EButton_Axis1);
             bool isMenuPressed = leftController.GetPress(EVRButtonId.k_EButton_ApplicationMenu);
 
-            // The left stick belongs exclusively to MMD playback transport.
-            if (!isGripPressed && !isTriggerPressed && !isMenuPressed
-                && VRMmdPlaybackController.TryHandleLeftStickPlaybackToggle())
-            {
-                return;
-            }
-
             if (isGripPressed && isTriggerPressed)
-            {
-                // 左摇杆按下 + 中指 Grip + 扳机 Trigger —— 切换 ReShade (模拟 Home 键)
                 ToggleReShade();
-            }
+            else if (isGripPressed && isMenuPressed)
+                NextReShadePreset();
             else if (isGripPressed)
-            {
-                // 左摇杆按下 + 中指 Grip (未按扳机) —— 召唤主菜单到面前
                 SummonMainGUI();
-            }
-            else if (!isTriggerPressed && !isMenuPressed)
+            else if (isTriggerPressed || isMenuPressed)
             {
-                // 左摇杆按下 (且未握住 Grip 和 Trigger) —— 切换 MMDD 播放/暂停
-                VRMmdPlaybackController.ConsumeLeftStickPlaybackClick();
-                ToggleMMDDPlayPause();
+                VRLog.Info("Left stick click skipped: chorded with "
+                    + (isTriggerPressed ? "trigger " : "")
+                    + (isMenuPressed ? "menu" : ""));
             }
         }
 
-        // 右摇杆按下优先控制 Timeline；不在 Timeline 控制空间时仍为撤销。
+        // 右摇杆按下：Grip 组合召唤角色至眼前；非组合时优先控制 Timeline 或撤销。
         if (rightController != null && rightController.GetPressDown(EVRButtonId.k_EButton_Axis0))
         {
-            bool isChorded = rightController.GetPress(EVRButtonId.k_EButton_Grip)
-                || rightController.GetPress(EVRButtonId.k_EButton_Axis1)
-                || rightController.GetPress(EVRButtonId.k_EButton_ApplicationMenu);
-            if (!isChorded)
+            bool isGripPressed = rightController.GetPress(EVRButtonId.k_EButton_Grip);
+            bool isTriggerPressed = rightController.GetPress(EVRButtonId.k_EButton_Axis1);
+            bool isMenuPressed = rightController.GetPress(EVRButtonId.k_EButton_ApplicationMenu);
+
+            if (isGripPressed && isTriggerPressed)
             {
-                if (VRTimelineCameraFollowController.TryHandleRightStickPlaybackToggle())
-                    return;
-                if (VRTimelineCameraFollowController.ShouldClaimRightStickTransport)
-                    return;
+                string feedback;
+                VRSpawnPlacementHelper.CallAllCharacters(false, out feedback);
+                VRLog.Info("Right stick chord (Grip+Trigger): " + feedback);
+                return;
+            }
+            if (isGripPressed)
+            {
+                string feedback;
+                VRSpawnPlacementHelper.CallSelectedCharacter(false, out feedback);
+                VRLog.Info("Right stick chord (Grip): " + feedback);
+                return;
             }
 
+            bool isChorded = isTriggerPressed || isMenuPressed;
+            if (!isChorded)
+            {
+                // Play/pause owns an unchorded stick click. Do not undo, and do
+                // not let the click fall through into a view change.
+                if (VRMmdPlaybackController.TryHandleLeftStickPlaybackToggle())
+                {
+                    VRLog.Info("Right stick click: MMD playback toggle");
+                    return;
+                }
+                if (VRTimelineCameraFollowController.TryHandleRightStickPlaybackToggle())
+                {
+                    VRLog.Info("Right stick click: timeline playback toggle");
+                    return;
+                }
+                if (VRTimelineCameraFollowController.ShouldClaimRightStickTransport)
+                {
+                    VRLog.Info("Right stick click skipped: timeline transport owns the stick");
+                    return;
+                }
+            }
             TryUndo();
         }
     }
 
-    private SteamVR_Controller.Device GetDevice(VRGIN.Controls.Controller controller)
+    private int _ikVisibilityTicks;
+
+    private void LateUpdate()
     {
-        if (controller != null && controller.IsTracking)
+        // Unity 2019 leaves Physics.autoSyncTransforms off. GUIQuad is a kinematic
+        // rigidbody, so a transform move is written back to the old pose on the
+        // next physics step unless we commit it. That pulled the studio panel
+        // off the spot in front of the head.
+        CommitGuiQuadPoses();
+
+        // The IK guide switch lives in the settings object too (config panel,
+        // wrist menu). Pick up an external change instead of waiting for the
+        // wrist menu page to refresh, so both stay in sync.
+        bool previousIkVisible = ikVisible;
+        PullIkGuideVisible();
+        bool ikChanged = previousIkVisible != ikVisible;
+
+        // New guides spawn with renderers on, so the periodic sweep (a scene-wide
+        // FindObjectsOfType) is only needed while guides are hidden.
+        if (ikChanged || _ikVisibilityTicks < 8 || (!ikVisible && (Time.frameCount % 45) == 0))
         {
-            SteamVR_TrackedObject trackedObj = ((Component)controller).GetComponent<SteamVR_TrackedObject>();
-            if (trackedObj != null)
-            {
-                return SteamVR_Controller.Input((int)trackedObj.index);
-            }
+            _ikVisibilityTicks++;
+            ApplyIkGuideVisibility();
         }
+    }
+
+    private static void CommitGuiQuadPoses()
+    {
+        bool any = false;
+        foreach (GUIQuad quad in GUIQuadRegistry.Quads)
+        {
+            if (quad == null)
+                continue;
+            any = true;
+            Rigidbody body = quad.GetComponent<Rigidbody>();
+            if (body == null)
+                continue;
+            Transform quadTransform = quad.transform;
+            body.position = quadTransform.position;
+            body.rotation = quadTransform.rotation;
+        }
+
+        if (any)
+            Physics.SyncTransforms();
+    }
+
+    private static bool _lastLeftStickHeld;
+
+    private static bool TryToggleMmdFromLeftStick(SteamVR_Controller.Device leftController)
+    {
+        if (leftController == null)
+        {
+            _lastLeftStickHeld = false;
+            return false;
+        }
+
+        bool held = leftController.GetPress(EVRButtonId.k_EButton_Axis0);
+        bool down = leftController.GetPressDown(EVRButtonId.k_EButton_Axis0)
+            || (!_lastLeftStickHeld && held);
+        _lastLeftStickHeld = held;
+
+        if (!down)
+            return false;
+        if (leftController.GetPress(EVRButtonId.k_EButton_Grip)
+            || leftController.GetPress(EVRButtonId.k_EButton_Axis1)
+            || leftController.GetPress(EVRButtonId.k_EButton_ApplicationMenu))
+            return false;
+
+        bool handled = VRMmdPlaybackController.TryHandleLeftStickPlaybackToggle();
+        VRLog.Info(handled
+            ? "Left stick click: MMD playback toggle"
+            : "Left stick click skipped: MMD playback did not handle it");
+        return true;
+    }
+
+    private string CurrentInputGate()
+    {
+        if (_presentationSuppressed)
+            return "presentation suppressed";
+        if (VRMmdPlaybackController.ConsumedPlaybackClickThisFrame)
+            return "MMD consumed playback click";
+        if (VRTimelineCameraFollowController.ConsumedRightStickTransportThisFrame)
+            return "timeline consumed right stick";
+        if (VRMmdPlaybackController.BlocksNormalInput)
+            return "MMD blocks normal input";
         return null;
+    }
+
+    private void LogBlockedToggleAttempts(
+        KKCharaStudioVRSettings settings,
+        SteamVR_Controller.Device leftController,
+        SteamVR_Controller.Device rightController,
+        string gate)
+    {
+        SteamVR_Controller.Device guiDevice;
+        EVRButtonId guiButton;
+        string guiLabel;
+        ResolveGuiToggleBinding(settings, leftController, rightController, out guiDevice, out guiButton, out guiLabel);
+        if (guiDevice != null && guiDevice.GetPressDown(guiButton))
+            VRLog.Info("GUI toggle skipped: " + gate + " (" + guiLabel + ")");
+
+        if (leftController != null && leftController.GetPressDown(EVRButtonId.k_EButton_Axis0))
+            VRLog.Info("Left stick click skipped: " + gate);
+        if (rightController != null && rightController.GetPressDown(EVRButtonId.k_EButton_Axis0))
+            VRLog.Info("Right stick click skipped: " + gate);
+    }
+
+    private static void LogDeviceState(ref string slot, string hand, SteamVR_Controller.Device device, string reason)
+    {
+        string key = device != null ? "ok" : (reason ?? "unavailable");
+        LogState(
+            ref slot,
+            key,
+            device != null
+                ? "Menu input: " + hand + " controller ready"
+                : "Menu input: " + hand + " controller unavailable (" + key + ")");
+    }
+
+    private static void LogState(ref string slot, string key, string message)
+    {
+        if (slot == key)
+            return;
+        slot = key;
+        VRLog.Info(message);
+    }
+
+    private SteamVR_Controller.Device GetDevice(VRGIN.Controls.Controller controller, out string reason)
+    {
+        if (controller == null)
+        {
+            reason = "controller missing";
+            return null;
+        }
+
+        try
+        {
+#if KKS
+            // Device index can stay unpublished while the pose action already
+            // reports button edges. ForController falls back to that pose.
+            // Do not require pose.isValid: OpenXR drops it while buttons still update.
+            SteamVR_Controller.Device device = SteamVR_Controller.ForController(controller);
+#else
+            int index = VRGameCompatibility.DeviceIndex(controller);
+            if (index < 0)
+            {
+                reason = "no tracked device index";
+                return null;
+            }
+
+            SteamVR_Controller.Device device = SteamVR_Controller.Input(index);
+#endif
+            if (device == null)
+            {
+                reason = "ForController returned null";
+                return null;
+            }
+            if (!device.connected)
+            {
+                reason = "device disconnected";
+                return null;
+            }
+
+            reason = null;
+            return device;
+        }
+        catch (Exception ex)
+        {
+            reason = ex.Message;
+            VRLog.Warn("Unable to read controller for quick actions: " + ex.Message);
+            return null;
+        }
     }
 
     internal void SetPresentationSuppressed(bool suppressed)
@@ -128,8 +327,8 @@ public class VRQuickActions : MonoBehaviour
         if (_presentationSuppressed == suppressed)
             return;
         _presentationSuppressed = suppressed;
-        _guiTogglePressActive = false;
 
+        _guiTogglePressActive = false;
         if (suppressed)
         {
             _presentationStates.Clear();
@@ -146,10 +345,19 @@ public class VRQuickActions : MonoBehaviour
         _presentationStates.Clear();
     }
 
+    private readonly List<GUIQuad> _presentationScratch = new List<GUIQuad>(8);
+
     private void SuppressNewPresentationGuiQuads()
     {
-        foreach (GUIQuad quad in new List<GUIQuad>(GUIQuadRegistry.Quads))
+        // Runs every frame while MMD presentation is active. SetActive(false)
+        // unregisters a quad from the registry mid-iteration, so a snapshot is
+        // required, but it must reuse one list instead of allocating per frame.
+        _presentationScratch.Clear();
+        foreach (GUIQuad registered in GUIQuadRegistry.Quads)
+            _presentationScratch.Add(registered);
+        for (int i = 0; i < _presentationScratch.Count; i++)
         {
+            GUIQuad quad = _presentationScratch[i];
             if (quad == null || quad.gameObject == null)
                 continue;
             if (!_presentationStates.ContainsKey(quad))
@@ -157,6 +365,7 @@ public class VRQuickActions : MonoBehaviour
             if (quad.gameObject.activeSelf)
                 quad.gameObject.SetActive(false);
         }
+        _presentationScratch.Clear();
     }
 
     private static KKCharaStudioVRSettings GetSettings()
@@ -166,34 +375,47 @@ public class VRQuickActions : MonoBehaviour
         return VR.Manager.Context.Settings as KKCharaStudioVRSettings;
     }
 
-    private void HandleGuiToggleButton(
+    private static void ResolveGuiToggleBinding(
         KKCharaStudioVRSettings settings,
         SteamVR_Controller.Device leftController,
-        SteamVR_Controller.Device rightController)
+        SteamVR_Controller.Device rightController,
+        out SteamVR_Controller.Device device,
+        out EVRButtonId button,
+        out string label)
     {
         string layout = settings != null
             ? settings.ControllerFaceButtonLayout
             : KKCharaStudioVRSettings.ControllerLayoutSplitHands;
-
-        SteamVR_Controller.Device device;
-        EVRButtonId button;
-
         if (layout == KKCharaStudioVRSettings.ControllerLayoutLeftHand)
         {
             device = leftController;
             button = EVRButtonId.k_EButton_ApplicationMenu;
+            label = "left Y/ApplicationMenu";
         }
         else if (layout == KKCharaStudioVRSettings.ControllerLayoutRightHand)
         {
             device = rightController;
             button = EVRButtonId.k_EButton_ApplicationMenu;
+            label = "right B/ApplicationMenu";
         }
         else
         {
+            // Split hands: right A shows/hides the Studio GUI. Left X is the wrist menu.
             device = rightController;
             button = EVRButtonId.k_EButton_A;
+            label = "right A";
         }
+    }
 
+    private void HandleGuiToggleButton(
+        KKCharaStudioVRSettings settings,
+        SteamVR_Controller.Device leftController,
+        SteamVR_Controller.Device rightController)
+    {
+        SteamVR_Controller.Device device;
+        EVRButtonId button;
+        string label;
+        ResolveGuiToggleBinding(settings, leftController, rightController, out device, out button, out label);
         if (device == null)
         {
             _guiTogglePressActive = false;
@@ -207,29 +429,84 @@ public class VRQuickActions : MonoBehaviour
             _guiTogglePressStarted = Time.unscaledTime;
         }
 
-        if (_guiTogglePressActive && device.GetPress(button))
+        if (_guiTogglePressActive)
         {
-            // ApplicationMenu is also used for long-hold reset and Grip/Trigger
-            // chords. Only an unchorded short release may toggle GUI visibility.
+            // ApplicationMenu is also the long-hold reset. Grip/trigger chords
+            // belong to grab and scale. Only an unchorded short release toggles.
             _guiTogglePressChorded |= device.GetPress(EVRButtonId.k_EButton_Grip)
                 || device.GetPress(EVRButtonId.k_EButton_Axis1);
         }
 
-        if (!_guiTogglePressActive || !device.GetPressUp(button))
+        // OpenXR can drop the press-up edge. A tracked press that is no longer
+        // held is the same short-press release KK handles with GetPressUp.
+        bool released = _guiTogglePressActive
+            && (device.GetPressUp(button) || !device.GetPress(button));
+        if (!released)
             return;
 
         float duration = Time.unscaledTime - _guiTogglePressStarted;
+        bool chorded = _guiTogglePressChorded;
         _guiTogglePressActive = false;
-        if (!_guiTogglePressChorded && duration <= GuiTogglePressMaxDuration)
+        if (chorded)
         {
-            ToggleAllGUI();
+            VRLog.Info("GUI toggle skipped: grip/trigger chord (" + label + ")");
+            return;
         }
+        if (duration > GuiTogglePressMaxDuration)
+        {
+            VRLog.Info("GUI toggle skipped: held " + duration.ToString("0.00") + "s (" + label + ")");
+            return;
+        }
+
+        ToggleAllGUI();
+    }
+
+    private static Transform HeadsetHead()
+    {
+        try
+        {
+            if (VR.Camera == null)
+                return null;
+            Transform head = VR.Camera.Head;
+            if (head != null)
+                return head;
+            if (VR.Camera.SteamCam != null)
+                return ((Component)VR.Camera.SteamCam).transform;
+            return ((Component)VR.Camera).transform;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private static List<GUIQuad> CollectGuiQuads()
+    {
+        var quads = new List<GUIQuad>();
+        var seen = new HashSet<GUIQuad>();
+        foreach (GUIQuad quad in GUIQuadRegistry.Quads)
+        {
+            if (quad != null && seen.Add(quad))
+                quads.Add(quad);
+        }
+
+        // OnDisable unregisters a quad. A quad that never registered (source was
+        // not VR.GUI during Awake) would otherwise be invisible to the toggle.
+        foreach (GUIQuad quad in UnityEngine.Object.FindObjectsOfType<GUIQuad>())
+        {
+            if (quad != null && seen.Add(quad))
+                quads.Add(quad);
+        }
+        return quads;
     }
 
     private bool ToggleAllGUI(bool bypassDebounce = false)
     {
         if (!bypassDebounce && Time.time - lastToggleTime < 0.5f)
+        {
+            VRLog.Info("GUI toggle skipped: debounce");
             return false;
+        }
         lastToggleTime = Time.time;
 
         uiVisible = !uiVisible;
@@ -238,7 +515,8 @@ public class VRQuickActions : MonoBehaviour
         {
             // HIDE: snapshot registry to avoid modification during iteration
             // (SetActive(false) in coroutine triggers OnDisable → Unregister)
-            var currentQuads = new List<GUIQuad>(GUIQuadRegistry.Quads);
+            var currentQuads = CollectGuiQuads();
+            int hidden = 0;
             foreach (var quad in currentQuads)
             {
                 if (quad == null || quad.gameObject == null) continue;
@@ -258,19 +536,21 @@ public class VRQuickActions : MonoBehaviour
                 previousStates[quad] = quad.gameObject.activeSelf;
                 if (quad.gameObject.activeSelf)
                 {
+                    hidden++;
                     scaleCoroutines[quad] = StartCoroutine(ScaleAnimation(quad, Vector3.zero, true, targetScale));
                 }
             }
+            VRLog.Info("GUI toggle result: hidden, quads=" + currentQuads.Count + ", animating=" + hidden);
         }
         else
         {
             // SHOW: iterate previousStates — quads have been unregistered from
             // GUIQuadRegistry when SetActive(false) triggered OnDisable → Unregister,
             // so GUIQuadRegistry.Quads is empty. We must use our saved references.
-            Transform head = VR.Camera.Head;
+            Transform head = HeadsetHead();
+            int restored = 0;
             KKCharaStudioVRSettings settings = GetSettings();
-            float guiDistance = settings != null ? settings.UISpawnDistance : 2.0f;
-            float guiDrop = 0.05f;
+            float guiDistance = settings != null ? settings.UISpawnDistance : KKCharaStudioVRSettings.DefaultUISpawnDistance;
 
             foreach (var kvp in new Dictionary<GUIQuad, bool>(previousStates))
             {
@@ -285,16 +565,15 @@ public class VRQuickActions : MonoBehaviour
                 }
                 Vector3 targetScale = originalScales.ContainsKey(quad) ? originalScales[quad] : Vector3.one;
 
-                // Reposition in front of head (VAM-style)
+                // Reposition naturally in front of head (perpendicular to user's gaze)
                 if (head != null)
                 {
                     Vector3 forward = head.forward;
-                    forward.y = 0f;
                     if (forward.sqrMagnitude < 0.001f) forward = Vector3.forward;
                     forward.Normalize();
 
-                    quad.transform.position = head.position + forward * guiDistance - Vector3.up * guiDrop;
-                    quad.transform.rotation = Quaternion.LookRotation(forward);
+                    quad.transform.position = head.position + forward * guiDistance;
+                    quad.transform.rotation = Quaternion.LookRotation(forward, head.up);
                 }
 
                 if (scaleCoroutines.ContainsKey(quad) && scaleCoroutines[quad] != null)
@@ -305,10 +584,12 @@ public class VRQuickActions : MonoBehaviour
                 quad.gameObject.SetActive(true);
                 quad.transform.localScale = Vector3.zero;
                 scaleCoroutines[quad] = StartCoroutine(ScaleAnimation(quad, targetScale, false, targetScale));
+                restored++;
             }
             previousStates.Clear();
+            VRLog.Info("GUI toggle result: visible, restored=" + restored
+                + (head != null ? ", respawned in front of head" : ", skipped respawn because head is null"));
         }
-        VRLog.Info($"Toggled UI Visibility to: {uiVisible}");
         return true;
     }
 
@@ -397,25 +678,32 @@ public class VRQuickActions : MonoBehaviour
             }
         }
 
-        if (mainQuad != null)
+        if (mainQuad == null)
         {
-            Transform head = VR.Camera.Head;
-            if (head != null)
-            {
-                KKCharaStudioVRSettings settings = GetSettings();
-                float guiDistance = settings != null ? settings.UISpawnDistance : 2.0f;
-                float guiScale = settings != null ? settings.UISpawnScale : 1.0f;
+            VRLog.Info("Summon main GUI skipped: no GUIQuad in the registry or saved set");
+            return false;
+        }
+
+        Transform head = HeadsetHead();
+        if (head == null)
+        {
+            VRLog.Info("Summon main GUI skipped: VR.Camera.Head is null");
+            return false;
+        }
+
+        KKCharaStudioVRSettings settings = GetSettings();
+        float guiDistance = settings != null ? settings.UISpawnDistance : KKCharaStudioVRSettings.DefaultUISpawnDistance;
+        float guiScale = settings != null ? settings.UISpawnScale : KKCharaStudioVRSettings.DefaultUISpawnScale;
 
                 Vector3 forward = head.forward;
-                forward.y = 0f;
                 if (forward.sqrMagnitude < 0.001f) forward = Vector3.forward;
                 forward.Normalize();
 
-                mainQuad.transform.position = head.position + forward * guiDistance - Vector3.up * 0.05f;
-                mainQuad.transform.rotation = Quaternion.LookRotation(forward);
+                mainQuad.transform.position = head.position + forward * guiDistance;
+                mainQuad.transform.rotation = Quaternion.LookRotation(forward, head.up);
                 VRLog.Info(reveal
-                    ? "Summoned main GUI panel to face"
-                    : "Updated main GUI placement without changing visibility");
+                    ? "Summon main GUI result: placed in front of head"
+                    : "Main GUI placement updated without changing visibility");
 
                 Vector3 targetScale = VRCameraMoveHelper.GetMainUIScale(guiScale);
                 originalScales[mainQuad] = targetScale;
@@ -428,16 +716,21 @@ public class VRQuickActions : MonoBehaviour
                         // Explicit Recall reveals the prior UI set; +/- previews do not.
                         if (!ToggleAllGUI(true))
                             return false;
+                        mainQuad.UpdateGUI();
                     }
                 }
                 else
                 {
-                    if (reveal)
-                        mainQuad.gameObject.SetActive(true);
+                if (reveal)
+                {
+                    mainQuad.gameObject.SetActive(true);
+                    mainQuad.UpdateGUI();
+                }
 
                     if (!mainQuad.gameObject.activeSelf)
                     {
                         mainQuad.transform.localScale = targetScale;
+                        VRLog.Info("Summon main GUI skipped: main quad stayed inactive");
                         return false;
                     }
 
@@ -448,10 +741,7 @@ public class VRQuickActions : MonoBehaviour
                     mainQuad.transform.localScale = Vector3.zero;
                     scaleCoroutines[mainQuad] = StartCoroutine(ScaleAnimation(mainQuad, targetScale, false, targetScale));
                 }
-                return !reveal || (uiVisible && mainQuad.gameObject.activeSelf);
-            }
-        }
-        return false;
+        return !reveal || (uiVisible && mainQuad.gameObject.activeSelf);
     }
 
     private void TryUndo()
@@ -463,6 +753,10 @@ public class VRQuickActions : MonoBehaviour
                 Singleton<UndoRedoManager>.Instance.Undo();
                 VRLog.Info("Undo executed");
             }
+            else
+            {
+                VRLog.Info("Undo skipped: Studio instance is null");
+            }
         }
         catch (Exception e)
         {
@@ -472,60 +766,123 @@ public class VRQuickActions : MonoBehaviour
 
     public static bool ikVisible = true;
 
+    internal static void PullIkGuideVisible()
+    {
+        if (VRInteractionOptions.Settings != null)
+            ikVisible = VRInteractionOptions.IkGuideVisible;
+    }
+
+    internal static void SetIkGuideVisible(bool visible)
+    {
+        ikVisible = visible;
+        KKCharaStudioVRSettings settings = VRInteractionOptions.Settings;
+        if (settings != null && settings.IkGuideVisible != visible)
+            settings.IkGuideVisible = visible;
+        ApplyIkGuideVisibility();
+    }
+
     private void ToggleIKVisibility()
     {
-        ikVisible = !ikVisible;
+        PullIkGuideVisible();
+        SetIkGuideVisible(!ikVisible);
+        VRLog.Info("Toggled IK guide renderers to: " + ikVisible + " (colliders stay enabled)");
+    }
 
-        // Only character guide handles have a guideObject. GUI panels also use
-        // MoveableGUIObject and must remain visible and interactive.
-        MoveableGUIObject[] mgos = FindObjectsOfType<MoveableGUIObject>();
-        foreach (var mgo in mgos)
+    internal static void ApplyIkGuideVisibility()
+    {
+        bool show = VRStudioInteractionPolicy.IkRendererEnabled(ikVisible);
+        bool colliders = VRStudioInteractionPolicy.IkColliderEnabled(ikVisible);
+
+        // Studio owns the green spheres through GuideObject.visible. Flipping only
+        // the renderers the plugin created left the native spheres on screen.
+        ApplyNativeGuideVisibility(VRStudioInteractionPolicy.NativeGuideVisible(ikVisible));
+
+        MoveableGUIObject[] mgos = UnityEngine.Object.FindObjectsOfType<MoveableGUIObject>();
+        foreach (MoveableGUIObject mgo in mgos)
         {
-            if (mgo != null && mgo.gameObject != null && mgo.guideObject != null)
+            if (mgo == null || mgo.gameObject == null || mgo.guideObject == null)
+                continue;
+            Renderer[] renderers = mgo.GetComponentsInChildren<Renderer>(true);
+            for (int i = 0; i < renderers.Length; i++)
             {
-                Renderer[] rs = mgo.GetComponentsInChildren<Renderer>(true);
-                foreach (var r in rs)
-                {
-                    r.enabled = ikVisible;
-                }
-
-                Collider[] cs = mgo.GetComponentsInChildren<Collider>(true);
-                foreach (var c in cs)
-                {
-                    c.enabled = ikVisible;
-                }
+                if (renderers[i] != null)
+                    renderers[i].enabled = show;
+            }
+            Collider[] cols = mgo.GetComponentsInChildren<Collider>(true);
+            for (int i = 0; i < cols.Length; i++)
+            {
+                if (cols[i] != null)
+                    cols[i].enabled = colliders;
             }
         }
 
-        // 2. 隐藏/显示游戏自带的坐标轴控制箭头 (move, rotation, scale)
-        if (Singleton<GuideObjectManager>.Instance != null)
+        if (Singleton<GuideObjectManager>.Instance == null || GuideDictionaryField == null)
+            return;
+        object raw = GuideDictionaryField.GetValue(Singleton<GuideObjectManager>.Instance);
+        if (raw is Dictionary<Transform, GuideObject> typed)
         {
-            var manager = Singleton<GuideObjectManager>.Instance;
-            var field = typeof(GuideObjectManager).GetField("dicGuideObject", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
-            if (field != null)
+            foreach (KeyValuePair<Transform, GuideObject> pair in typed)
+                ApplyGuideVisual(pair.Value, show, colliders);
+        }
+        else if (raw is System.Collections.IDictionary dic)
+        {
+            foreach (System.Collections.DictionaryEntry entry in dic)
+                ApplyGuideVisual(entry.Value as GuideObject, show, colliders);
+        }
+    }
+
+    private static bool _nativeGuideFailureLogged;
+
+    private static void ApplyNativeGuideVisibility(bool visible)
+    {
+        Studio.Studio studio = Singleton<Studio.Studio>.Instance;
+        if (studio == null || studio.dicObjectCtrl == null)
+            return;
+        try
+        {
+            foreach (KeyValuePair<int, ObjectCtrlInfo> pair in studio.dicObjectCtrl)
             {
-                var dic = field.GetValue(manager) as System.Collections.IDictionary;
-                if (dic != null)
-                {
-                    foreach (System.Collections.DictionaryEntry entry in dic)
-                    {
-                        var go = entry.Value as GuideObject;
-                        if (go != null && go.gameObject != null)
-                        {
-                            Transform move = go.transform.Find("move");
-                            if (move != null) move.gameObject.SetActive(ikVisible);
-
-                            Transform rotation = go.transform.Find("rotation");
-                            if (rotation != null) rotation.gameObject.SetActive(ikVisible);
-
-                            Transform scale = go.transform.Find("scale");
-                            if (scale != null) scale.gameObject.SetActive(ikVisible);
-                        }
-                    }
-                }
+                OCIChar character = pair.Value as OCIChar;
+                if (character == null)
+                    continue;
+                character.VisibleIKGuide(visible);
+                character.VisibleFKGuide(visible);
             }
         }
-        VRLog.Info($"Toggled IK Controls visibility to: {ikVisible}");
+        catch (Exception ex)
+        {
+            if (_nativeGuideFailureLogged)
+                return;
+            _nativeGuideFailureLogged = true;
+            VRLog.Warn("Native IK guide visibility call failed: " + ex.Message);
+        }
+    }
+
+    private static readonly System.Reflection.FieldInfo GuideDictionaryField = typeof(GuideObjectManager).GetField(
+        "dicGuideObject",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+
+    private static void ApplyGuideVisual(GuideObject guide, bool show, bool colliders)
+    {
+        if (guide == null)
+            return;
+        // Sweep the whole guide, not just the axis gizmos: the green ball is the
+        // "Sphere" child, and Studio's own draw flag turns its collider off with it.
+        // Studio keeps an unselected guide's gizmo deactivated on purpose, so the
+        // GameObjects are never reactivated here.
+        bool guideShow = VRStudioInteractionPolicy.GuideRendererEnabled(show, guide.visible, guide.visibleOutside);
+        Renderer[] renderers = guide.GetComponentsInChildren<Renderer>(true);
+        for (int i = 0; i < renderers.Length; i++)
+        {
+            if (renderers[i] != null)
+                renderers[i].enabled = guideShow;
+        }
+        Collider[] cols = guide.GetComponentsInChildren<Collider>(true);
+        for (int i = 0; i < cols.Length; i++)
+        {
+            if (cols[i] != null)
+                cols[i].enabled = colliders;
+        }
     }
 
     public bool ToggleIkControls(out string status)
@@ -535,16 +892,25 @@ public class VRQuickActions : MonoBehaviour
         return true;
     }
 
-    private void ToggleMMDDPlayPause()
-    {
-        string status;
-        if (!VRMmddService.TogglePlayPause(out status))
-            VRLog.Warn(status);
-    }
-
     private void ToggleReShade()
     {
         VRLog.Info("Left controller Left Joystick Click + Grip + Trigger pressed! Toggling ReShade (End key)...");
         KeyboradSimulatorUtil.PressEndKey();
+    }
+
+    private void NextReShadePreset()
+    {
+        VRLog.Info("Left controller Left Joystick Click + Grip + Menu pressed! Cycling ReShade preset (PageDown key)...");
+        KeyboradSimulatorUtil.PressPageDown();
+    }
+
+    public static void CycleNextReShadePreset()
+    {
+        KeyboradSimulatorUtil.PressPageDown();
+    }
+
+    public static void CyclePrevReShadePreset()
+    {
+        KeyboradSimulatorUtil.PressPageUp();
     }
 }

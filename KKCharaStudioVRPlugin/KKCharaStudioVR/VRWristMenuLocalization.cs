@@ -597,6 +597,8 @@ public sealed partial class VRWristMenuController
         ClearMmdExtendedMenuReferences();
         _highHeelsPage = null;
         _settingsPage = null;
+        ClearIkMenuReferences();
+        ClearFigureScaleMenuReferences();
         _settingsGeneralPanel = null;
         _settingsInteractionPanel = null;
         _settingsVisualPanel = null;
@@ -656,6 +658,22 @@ public sealed partial class VRWristMenuController
         _browserGenderSwitchButton = null;
         _browserPathText = null;
         _browserScrollText = null;
+        _browserViewModeButton = null;
+        _gridPrevButton = null;
+        _gridNextButton = null;
+        _gridQuickLoadButton = null;
+        _gridActionLoadButton = null;
+        _gridActionReplaceButton = null;
+        _gridPageText = null;
+        _gridEmptyFolderText = null;
+        _gridControlsContainer = null;
+        if (_cardThumbnailCache != null)
+        {
+            _cardThumbnailCache.Clear();
+            _cardThumbnailCache = null;
+        }
+        for (int i = 0; i < _gridCards.Length; i++)
+            _gridCards[i] = null;
         _characterPreviewImage = null;
         _characterPreviewRect = null;
         _characterPreviewMessageText = null;

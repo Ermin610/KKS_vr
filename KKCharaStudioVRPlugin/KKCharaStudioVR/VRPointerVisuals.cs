@@ -40,6 +40,8 @@ internal static class VRPointerVisuals
         material.renderQueue = 5000;
         if (material.HasProperty("_Color"))
             material.color = color;
+        if (material.HasProperty("_Cull"))
+            material.SetInt("_Cull", (int)UnityEngine.Rendering.CullMode.Off);
         return material;
     }
 

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using Manager;
 using Studio;
@@ -61,6 +62,7 @@ namespace KK_VR_CameraSync
         private bool _timelineStateKnown;
         private bool _timelineWasPlaying;
         private PropertyInfo _timelineIsPlayingProperty;
+        private Func<bool> _timelineIsPlayingGetter;
         private float _nextTimelineResolveTime;
 
         internal bool IsSuspended
@@ -116,6 +118,9 @@ namespace KK_VR_CameraSync
 
         internal void CompleteNativeSceneLoad(bool succeeded)
         {
+            if (_nativeSceneLoadDepth <= 0 && !_nativeSceneLoadPending)
+                return;
+
             if (_nativeSceneLoadDepth > 0)
                 _nativeSceneLoadDepth--;
 
@@ -620,7 +625,7 @@ namespace KK_VR_CameraSync
             {
                 Quaternion currentHeadRotation =
                     rotationMode == CameraRotationMode.YawOnly
-                        ? Quaternion.Euler(0f, head.rotation.eulerAngles.y, 0f)
+                        ? YawOnly(head.rotation)
                         : head.rotation;
                 Quaternion rotationDelta =
                     targetRotation * Quaternion.Inverse(currentHeadRotation);
@@ -642,7 +647,7 @@ namespace KK_VR_CameraSync
             Vector3 headPosition = head.position;
             Quaternion currentHeadRotation =
                 rotationMode == CameraRotationMode.YawOnly
-                    ? Quaternion.Euler(0f, head.rotation.eulerAngles.y, 0f)
+                    ? YawOnly(head.rotation)
                     : head.rotation;
             Quaternion rotationDelta =
                 targetRotation * Quaternion.Inverse(currentHeadRotation);
@@ -660,10 +665,28 @@ namespace KK_VR_CameraSync
                 case CameraRotationMode.Full:
                     return rotation;
                 case CameraRotationMode.YawOnly:
-                    return Quaternion.Euler(0f, rotation.eulerAngles.y, 0f);
+                    return YawOnly(rotation);
                 default:
                     return Quaternion.identity;
             }
+        }
+
+        // eulerAngles.y flips when pitch crosses the poles, which stepped the
+        // view during a Timeline or Studio pitch move in yaw-only mode.
+        private static Quaternion YawOnly(Quaternion rotation)
+        {
+            Vector3 forward = rotation * Vector3.forward;
+            forward.y = 0f;
+            if (forward.sqrMagnitude < 1e-8f)
+            {
+                Vector3 fallback = rotation * Vector3.up;
+                fallback.y = 0f;
+                if (fallback.sqrMagnitude < 1e-8f)
+                    return Quaternion.identity;
+                return Quaternion.LookRotation(fallback, Vector3.up);
+            }
+
+            return Quaternion.LookRotation(forward, Vector3.up);
         }
 
         private static bool TryGetVrRig(
@@ -681,20 +704,69 @@ namespace KK_VR_CameraSync
             return origin != null && head != null;
         }
 
+        private static bool _sceneLoadingFaultLogged;
+        private static bool _timelineResolveFaultLogged;
+        private static float _sceneLoadingSince = -1f;
+        private static bool _sceneLoadingWatchdogLogged;
+        private const float SceneLoadingWatchdogSeconds = 180f;
+
         private static bool IsSceneLoading()
         {
+            bool loading;
+            try
+            {
 #if KKS
-            return Scene.IsNowLoading || Scene.IsNowLoadingFade;
+                // IllusionFixes patches this static getter and throws until
+                // Manager.Scene exists. That used to abort LateUpdate.
+                loading = Scene.IsNowLoading || Scene.IsNowLoadingFade;
 #else
-            Scene scene = Singleton<Scene>.Instance;
-            return scene != null &&
-                   (scene.IsNowLoading || scene.IsNowLoadingFade);
+                Scene scene = Singleton<Scene>.Instance;
+                loading = scene != null &&
+                       (scene.IsNowLoading || scene.IsNowLoadingFade);
 #endif
+            }
+            catch (Exception exception)
+            {
+                if (!_sceneLoadingFaultLogged && Plugin.Log != null)
+                {
+                    _sceneLoadingFaultLogged = true;
+                    Plugin.Log.LogWarning(
+                        "Scene loading flag could not be read; camera sync will wait. "
+                        + exception.Message);
+                }
+                loading = true;
+            }
+
+            if (!loading)
+            {
+                _sceneLoadingSince = -1f;
+                _sceneLoadingWatchdogLogged = false;
+                return false;
+            }
+
+            if (_sceneLoadingSince < 0f)
+                _sceneLoadingSince = Time.realtimeSinceStartup;
+            if (Time.realtimeSinceStartup - _sceneLoadingSince < SceneLoadingWatchdogSeconds)
+                return true;
+
+            if (!_sceneLoadingWatchdogLogged && Plugin.Log != null)
+            {
+                _sceneLoadingWatchdogLogged = true;
+                Plugin.Log.LogWarning(
+                    "Scene loading flags stayed set for "
+                    + SceneLoadingWatchdogSeconds
+                    + "s; camera sync is resuming.");
+            }
+            return false;
         }
 
         private bool TryGetTimelinePlaybackState(out bool isPlaying)
         {
             isPlaying = false;
+#if KKS
+            if (TimelineDisabled)
+                return false;
+#endif
 
             if (_timelineIsPlayingProperty == null &&
                 Time.unscaledTime >= _nextTimelineResolveTime)
@@ -705,20 +777,55 @@ namespace KK_VR_CameraSync
                     BindingFlags.Public |
                     BindingFlags.NonPublic;
 
-                foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+                try
                 {
-                    if (!string.Equals(
-                            assembly.GetName().Name,
-                            "Timeline",
-                            StringComparison.OrdinalIgnoreCase))
-                        continue;
+                    foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        if (!string.Equals(
+                                assembly.GetName().Name,
+                                "Timeline",
+                                StringComparison.OrdinalIgnoreCase))
+                            continue;
 
-                    Type timelineType = assembly.GetType("Timeline.Timeline", false);
-                    _timelineIsPlayingProperty =
-                        timelineType == null
+                        Type timelineType = assembly.GetType("Timeline.Timeline", false);
+                        PropertyInfo property = timelineType == null
                             ? null
                             : timelineType.GetProperty("isPlaying", flags);
-                    break;
+                        MethodInfo getter = property == null
+                            ? null
+                            : property.GetGetMethod(true);
+                        bool resolved = getter != null && getter.IsStatic && property.PropertyType == typeof(bool);
+                        _timelineIsPlayingProperty = resolved ? property : null;
+                        _timelineIsPlayingGetter = null;
+                        if (resolved)
+                        {
+                            try
+                            {
+                                // PropertyInfo.GetValue boxes the bool on every poll.
+                                _timelineIsPlayingGetter =
+                                    (Func<bool>)Delegate.CreateDelegate(typeof(Func<bool>), getter);
+                            }
+                            catch (ArgumentException)
+                            {
+                                // Same-assembly static getters normally bind. If
+                                // they do not, GetValue below still reads the flag.
+                                _timelineIsPlayingGetter = null;
+                            }
+                        }
+                        break;
+                    }
+                }
+                catch (Exception exception)
+                {
+                    _timelineIsPlayingProperty = null;
+                    _timelineIsPlayingGetter = null;
+                    if (!_timelineResolveFaultLogged && Plugin.Log != null)
+                    {
+                        _timelineResolveFaultLogged = true;
+                        Plugin.Log.LogWarning(
+                            "Timeline.isPlaying could not be resolved; camera sync will not follow playback. "
+                            + exception.Message);
+                    }
                 }
             }
 
@@ -727,6 +834,12 @@ namespace KK_VR_CameraSync
 
             try
             {
+                if (_timelineIsPlayingGetter != null)
+                {
+                    isPlaying = _timelineIsPlayingGetter();
+                    return true;
+                }
+
                 object value = _timelineIsPlayingProperty.GetValue(null, null);
                 if (!(value is bool))
                     return false;
@@ -737,6 +850,7 @@ namespace KK_VR_CameraSync
             catch
             {
                 _timelineIsPlayingProperty = null;
+                _timelineIsPlayingGetter = null;
                 _nextTimelineResolveTime = Time.unscaledTime + 1f;
                 return false;
             }
@@ -771,7 +885,11 @@ namespace KK_VR_CameraSync
             }
 
             Studio.CameraControl cameraControl = studio.cameraCtrl;
-            Studio.CameraControl.CameraData cameraData = cameraControl.Export();
+            // Export allocates a CameraData copy on every poll. The live field
+            // is only read; FOV compensation writes a local Vector3.
+            Studio.CameraControl.CameraData cameraData = ReadLiveCameraData(cameraControl);
+            if (cameraData == null)
+                return false;
             return TryConvertCameraData(
                 cameraControl,
                 cameraData,
@@ -845,8 +963,7 @@ namespace KK_VR_CameraSync
                     effectiveDistance.z *= sourceRate / referenceRate;
 #endif
             }
-            Transform transformBase =
-                ReadMember(cameraControl, "transBase") as Transform;
+            Transform transformBase = cameraControl.transBase;
 
             if (transformBase != null)
             {
@@ -901,14 +1018,62 @@ namespace KK_VR_CameraSync
             if (cameraTransform == null)
                 return false;
 
+            if (!ReferenceEquals(objectCamera, _cachedObjectCamera) ||
+                !ReferenceEquals(objectItem, _cachedObjectItem) ||
+                _cachedObjectTransform == null)
+            {
+                _cachedObjectCamera = objectCamera;
+                _cachedObjectItem = objectItem;
+                _cachedObjectTransform = cameraTransform;
+                _cachedObjectLens = cameraTransform.GetComponentInChildren<Camera>();
+            }
+            else if (_cachedObjectLens == null)
+            {
+                _cachedObjectLens = _cachedObjectTransform.GetComponentInChildren<Camera>();
+            }
+
             pose.Position = cameraTransform.position;
             pose.Rotation = cameraTransform.rotation;
             pose.Source = CameraPoseSource.ObjectCamera;
-            Camera camera = cameraTransform.GetComponentInChildren<Camera>();
-            pose.SourceFieldOfView = camera == null ? 0f : camera.fieldOfView;
+            pose.SourceFieldOfView = _cachedObjectLens == null ? 0f : _cachedObjectLens.fieldOfView;
             pose.EffectiveDistanceZ = 0f;
             pose.FovCompensated = false;
             return true;
+        }
+
+        private struct CachedMember
+        {
+            public PropertyInfo Property;
+            public FieldInfo Field;
+        }
+
+        private static readonly Dictionary<string, CachedMember> MemberCache =
+            new Dictionary<string, CachedMember>();
+        private static FieldInfo _cameraDataField;
+        private static bool _cameraDataFieldResolved;
+        private static object _cachedObjectCamera;
+        private static object _cachedObjectItem;
+        private static Transform _cachedObjectTransform;
+        private static Camera _cachedObjectLens;
+
+        private static Studio.CameraControl.CameraData ReadLiveCameraData(
+            Studio.CameraControl cameraControl)
+        {
+            if (!_cameraDataFieldResolved)
+            {
+                _cameraDataFieldResolved = true;
+                _cameraDataField = FindInstanceField(typeof(Studio.CameraControl), "cameraData");
+            }
+
+            if (_cameraDataField != null)
+            {
+                Studio.CameraControl.CameraData live =
+                    _cameraDataField.GetValue(cameraControl) as Studio.CameraControl.CameraData;
+                if (live != null)
+                    return live;
+            }
+
+            return cameraControl.Export();
         }
 
         private static object ReadMember(object instance, string name)
@@ -917,17 +1082,65 @@ namespace KK_VR_CameraSync
                 return null;
 
             Type type = instance.GetType();
+            string key = (type.FullName ?? type.Name) + "\n" + name;
+            CachedMember cached;
+            if (!MemberCache.TryGetValue(key, out cached))
+            {
+                PropertyInfo property = FindInstanceProperty(type, name);
+                FieldInfo field = null;
+                if (property == null || property.GetIndexParameters().Length != 0)
+                {
+                    property = null;
+                    field = FindInstanceField(type, name);
+                }
+
+                cached = new CachedMember
+                {
+                    Property = property,
+                    Field = field
+                };
+                MemberCache[key] = cached;
+            }
+
+            if (cached.Property != null)
+                return cached.Property.GetValue(instance, null);
+            return cached.Field == null ? null : cached.Field.GetValue(instance);
+        }
+
+        private static PropertyInfo FindInstanceProperty(Type type, string name)
+        {
             const BindingFlags flags =
                 BindingFlags.Instance |
                 BindingFlags.Public |
-                BindingFlags.NonPublic;
+                BindingFlags.NonPublic |
+                BindingFlags.DeclaredOnly;
+            while (type != null && type != typeof(object))
+            {
+                PropertyInfo property = type.GetProperty(name, flags);
+                if (property != null)
+                    return property;
+                type = type.BaseType;
+            }
 
-            PropertyInfo property = type.GetProperty(name, flags);
-            if (property != null && property.GetIndexParameters().Length == 0)
-                return property.GetValue(instance, null);
+            return null;
+        }
 
-            FieldInfo field = type.GetField(name, flags);
-            return field == null ? null : field.GetValue(instance);
+        private static FieldInfo FindInstanceField(Type type, string name)
+        {
+            const BindingFlags flags =
+                BindingFlags.Instance |
+                BindingFlags.Public |
+                BindingFlags.NonPublic |
+                BindingFlags.DeclaredOnly;
+            while (type != null && type != typeof(object))
+            {
+                FieldInfo field = type.GetField(name, flags);
+                if (field != null)
+                    return field;
+                type = type.BaseType;
+            }
+
+            return null;
         }
 
         private void LogExceptionThrottled(Exception exception)

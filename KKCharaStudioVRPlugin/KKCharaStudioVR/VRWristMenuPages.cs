@@ -27,6 +27,7 @@ public sealed partial class VRWristMenuController
         SelectVmdActor,
         SelectVmdCamera,
         SelectClothingActor,
+        SelectFigureScaleActor,
         SelectHighHeelsActor,
         SelectCharacterReplaceActor,
         SelectCharacterRemoveActor,
@@ -66,7 +67,9 @@ public sealed partial class VRWristMenuController
     private string _vmdRootPickerPreviousDirectory;
     private int _vmdRootPickerPreviousOffset;
     private VRWristMenuButtonTarget _browserGenderSwitchButton;
+    private int _lastAddedCharacterObjectKey = -1;
     private VRWristMenuButtonTarget _browserRemoveCharacterButton;
+    private VRWristMenuButtonTarget _browserUpButton;
     private readonly HashSet<int> _selectedCoordinateAccessorySlots = new HashSet<int>();
     private List<VRWristFileEntry> _coordinateAccessoryEntries =
         new List<VRWristFileEntry>();
@@ -99,9 +102,9 @@ public sealed partial class VRWristMenuController
             L("文件", "ファイル", "Files"),
             92f,
             10f,
-            258f,
+            168f,
             40f,
-            27,
+            26,
             TextAnchor.MiddleLeft,
             Color.white);
         _browserHeaderActionButton = CreateButton(
@@ -119,27 +122,27 @@ public sealed partial class VRWristMenuController
         _browserHeaderActionButton.SetVisible(false);
         _browserRemoveCharacterButton = CreateButton(
             "BrowserRemoveCharacter",
-            L("移除人物", "人物を削除", "Remove"),
+            L("移除", "削除", "Remove"),
             362f,
             10f,
             new Color(0.34f, 0.07f, 0.09f, 0.58f),
             new Color(0.68f, 0.11f, 0.14f, 0.84f),
             HandleOpenCharacterRemoval,
             _browserPage.transform,
-            96f,
+            78f,
             38f,
             14);
         _browserRemoveCharacterButton.SetVisible(false);
         _browserGenderSwitchButton = CreateButton(
-            "BrowserGenderSwitch",
-            L("男卡", "男性", "Male"),
-            466f,
+            "BrowserOpenClothing",
+            L("服装", "衣装", "Clothes"),
+            448f,
             10f,
-            new Color(0.12f, 0.16f, 0.2f, 0.42f),
-            new Color(0.22f, 0.34f, 0.42f, 0.72f),
-            HandleBrowserGenderSwitch,
+            new Color(0.075f, 0.24f, 0.14f, 0.48f),
+            new Color(0.11f, 0.46f, 0.24f, 0.76f),
+            HandleBrowserOpenClothing,
             _browserPage.transform,
-            70f,
+            88f,
             38f,
             14);
         _browserGenderSwitchButton.SetVisible(false);
@@ -159,11 +162,24 @@ public sealed partial class VRWristMenuController
             string.Empty,
             36f,
             60f,
-            488f,
+            360f,
             32f,
             16,
             TextAnchor.MiddleLeft,
             new Color(0.76f, 0.88f, 0.94f, 1f));
+        _browserUpButton = CreateButton(
+            "BrowserUpLevel",
+            L("↑ 上级", "↑ 上へ", "↑ Up"),
+            408f,
+            58f,
+            new Color(0.16f, 0.22f, 0.16f, 0.62f),
+            new Color(0.28f, 0.42f, 0.24f, 0.88f),
+            HandleBrowserUpLevel,
+            _browserPage.transform,
+            120f,
+            36f,
+            14);
+        _browserUpButton.SetVisible(false);
         _browserPathText.horizontalOverflow = HorizontalWrapMode.Overflow;
         _browserPathText.verticalOverflow = VerticalWrapMode.Truncate;
 
@@ -195,6 +211,7 @@ public sealed partial class VRWristMenuController
             15,
             TextAnchor.MiddleCenter,
             new Color(0.58f, 0.7f, 0.76f, 1f));
+        BuildBrowserCardGrid();
     }
 
     private void BuildSceneSavePage()
@@ -289,36 +306,86 @@ public sealed partial class VRWristMenuController
             _characterCardsPage.transform,
             L("角色卡分类", "キャラカード分類", "Character card categories"),
             24f,
-            76f,
+            64f,
             512f,
-            28f,
+            24f,
             18,
             TextAnchor.MiddleLeft,
             new Color(0.47f, 0.9f, 0.55f, 1f));
         CreateButton(
             "CharacterAddFemale",
-            L("女性角色卡  >\n浏览并预览", "女性キャラカード  >\n閲覧・プレビュー", "Female character cards  >\nBrowse and preview"),
+            L("女性角色卡  >\n浏览并预览 (自动生成在眼前)", "女性キャラカード  >\n閲覧・プレビュー (眼前生成)", "Female character cards  >\nBrowse and preview (spawn in front)"),
             24f,
-            116f,
+            96f,
             new Color(0.075f, 0.24f, 0.14f, 0.48f),
             new Color(0.11f, 0.46f, 0.24f, 0.76f),
             () => OpenCharacterBrowser(VRCharacterCardMode.AddFemale),
             _characterCardsPage.transform,
             512f,
-            96f,
-            22);
+            72f,
+            18);
         CreateButton(
-            "CharacterAddMale",
-            L("男性角色卡  >\n浏览并预览", "男性キャラカード  >\n閲覧・プレビュー", "Male character cards  >\nBrowse and preview"),
+            "CharacterOpenClothing",
+            L("服装  >\n切换当前角色的衣服", "衣装  >\n現在のキャラの着替え", "Clothes  >\nChange the current character's outfit"),
             24f,
-            232f,
+            176f,
             new Color(0.075f, 0.24f, 0.14f, 0.48f),
             new Color(0.11f, 0.46f, 0.24f, 0.76f),
-            () => OpenCharacterBrowser(VRCharacterCardMode.AddMale),
+            HandleBrowserOpenClothing,
             _characterCardsPage.transform,
             512f,
-            96f,
-            22);
+            72f,
+            18);
+
+        CreateText(
+            "CharacterCallSection",
+            _characterCardsPage.transform,
+            L("角色位置召唤 (眼前瞬间移动)", "キャラクター位置呼出", "Summon character position"),
+            24f,
+            258f,
+            512f,
+            24f,
+            18,
+            TextAnchor.MiddleLeft,
+            new Color(0.47f, 0.9f, 0.55f, 1f));
+        CreateButton(
+            "CharacterCallSelected",
+            L("将选中角色唤到眼前\n(手柄: 右摇杆+Grip)", "選択キャラを目の前へ\n(Rスティック+Grip)", "Call character to me\n(R-Stick + Grip)"),
+            24f,
+            288f,
+            new Color(0.12f, 0.24f, 0.38f, 0.55f),
+            new Color(0.18f, 0.45f, 0.72f, 0.85f),
+            HandleCallSelectedCharacter,
+            _characterCardsPage.transform,
+            248f,
+            68f,
+            16);
+        CreateButton(
+            "CharacterCallAll",
+            L("将全部角色唤到眼前\n(多角色自动并排)", "全員を目の前へ整列\n(横並びに整列)", "Call all characters\n(Line up facing me)"),
+            288f,
+            288f,
+            new Color(0.12f, 0.24f, 0.38f, 0.55f),
+            new Color(0.18f, 0.45f, 0.72f, 0.85f),
+            HandleCallAllCharacters,
+            _characterCardsPage.transform,
+            248f,
+            68f,
+            16);
+    }
+
+    private void HandleCallSelectedCharacter()
+    {
+        string feedback;
+        bool ok = VRSpawnPlacementHelper.CallSelectedCharacter(false, out feedback);
+        SetStatus(feedback, ok ? new Color(0.35f, 1f, 0.62f, 1f) : new Color(1f, 0.38f, 0.34f, 1f), 5f);
+    }
+
+    private void HandleCallAllCharacters()
+    {
+        string feedback;
+        int count = VRSpawnPlacementHelper.CallAllCharacters(false, out feedback);
+        SetStatus(feedback, count > 0 ? new Color(0.35f, 1f, 0.62f, 1f) : new Color(1f, 0.38f, 0.34f, 1f), 5f);
     }
 
     private void HandleOpenCharacterCards()
@@ -711,6 +778,9 @@ public sealed partial class VRWristMenuController
             _browserFixedEntries = null;
             _browserOffset = 0;
             _browserStickDirection = 0;
+            _gridOffset = 0;
+            _selectedGridIndex = -1;
+            _pendingGridCardPath = null;
             RefreshBrowserEntries();
             ShowPage(WristMenuPage.Browser);
         }
@@ -732,6 +802,7 @@ public sealed partial class VRWristMenuController
         else if ((_browserMode == BrowserMode.SelectVmdActor
                 || _browserMode == BrowserMode.SelectVmdCamera
                 || _browserMode == BrowserMode.SelectClothingActor
+                || _browserMode == BrowserMode.SelectFigureScaleActor
                 || _browserMode == BrowserMode.SelectHighHeelsActor
                 || _browserMode == BrowserMode.SelectCharacterReplaceActor
                 || _browserMode == BrowserMode.SelectCharacterRemoveActor
@@ -759,6 +830,7 @@ public sealed partial class VRWristMenuController
                 case BrowserMode.AddMale:
                 case BrowserMode.CoordinateCards:
                     extensions = new[] { ".png" };
+                    filesBeforeDirectories = true;
                     break;
                 default:
                     extensions = new string[0];
@@ -772,11 +844,61 @@ public sealed partial class VRWristMenuController
                 inspectVmd,
                 filter,
                 filesBeforeDirectories);
+
+            if (_browserMode == BrowserMode.LoadVmd && _browserEntries.Count > 0)
+            {
+                SortVmdBrowserEntriesByRating(_browserEntries);
+            }
         }
 
         int maximumOffset = Math.Max(0, _browserEntries.Count - BrowserVisibleRows);
         _browserOffset = Mathf.Clamp(_browserOffset, 0, maximumOffset);
         RefreshBrowserVisuals();
+        BeginCardThumbnailPrewarm();
+    }
+
+    private static void SortVmdBrowserEntriesByRating(List<VRWristFileEntry> entries)
+    {
+        if (entries == null || entries.Count < 2)
+            return;
+
+        // Resolve every rating once. Looking it up inside the comparer ran a
+        // fuzzy database search twice per comparison and, because the answer
+        // could differ between calls, risked an inconsistent comparer.
+        VRMmdDanceRatingDatabase database = VRMmdDanceRatingStore.Database;
+        Dictionary<VRWristFileEntry, float> ratings = new Dictionary<VRWristFileEntry, float>(entries.Count);
+        for (int i = 0; i < entries.Count; i++)
+        {
+            VRWristFileEntry entry = entries[i];
+            if (entry == null || ratings.ContainsKey(entry))
+                continue;
+            float rating = 0f;
+            VRMmdDanceRatingEntry found;
+            if (database != null
+                && (database.TryGetEntry(entry.DisplayName, out found)
+                    || database.TryGetEntry(entry.FullPath, out found)))
+            {
+                rating = found.Rating;
+            }
+            ratings[entry] = rating;
+        }
+
+        entries.Sort((a, b) =>
+        {
+            if (a == null || b == null)
+                return (a == null ? 1 : 0) - (b == null ? 1 : 0);
+            if (a.IsDirectory != b.IsDirectory)
+                return a.IsDirectory ? -1 : 1;
+
+            float rA;
+            float rB;
+            ratings.TryGetValue(a, out rA);
+            ratings.TryGetValue(b, out rB);
+
+            int rComp = rB.CompareTo(rA);
+            if (rComp != 0) return rComp;
+            return StringComparer.CurrentCultureIgnoreCase.Compare(a.DisplayName, b.DisplayName);
+        });
     }
 
     private void RefreshBrowserVisuals()
@@ -799,10 +921,7 @@ public sealed partial class VRWristMenuController
         _browserRemoveCharacterButton.SetVisible(showGenderSwitch);
         if (showGenderSwitch)
         {
-            _browserGenderSwitchButton.SetLabel(
-                _browserMode == BrowserMode.AddFemale
-                    ? L("男卡", "男性", "Male")
-                    : L("女卡", "女性", "Female"));
+            _browserGenderSwitchButton.SetLabel(L("服装", "衣装", "Clothes"));
         }
         if (showHeaderAction)
         {
@@ -825,6 +944,43 @@ public sealed partial class VRWristMenuController
                         : L("使用此目录", "このフォルダーを使用", "Use this folder"));
             }
         }
+
+        bool isCardBrowser = IsCardPreviewBrowserMode(_browserMode);
+        bool showUp = isCardBrowser && VRWristFileCatalog.CanAscend(_browserRoot, _browserDirectory);
+        if (_browserUpButton != null)
+            _browserUpButton.SetVisible(showUp);
+        int upUnits = showUp ? 14 : 0;
+        if (_browserViewModeButton != null)
+        {
+            _browserViewModeButton.SetVisible(isCardBrowser);
+            if (isCardBrowser)
+            {
+                _browserViewModeButton.SetLabel(_browserGridView
+                    ? L("≡ 列表", "≡ 一覧", "≡ List")
+                    : L("⊞ 网格", "⊞ グリッド", "⊞ Grid"));
+            }
+        }
+
+        if (isCardBrowser && _browserGridView)
+        {
+            for (int row = 0; row < _browserEntryButtons.Length; row++)
+            {
+                _browserEntryButtons[row].SetVisible(false);
+            }
+            if (_browserScrollText != null)
+                _browserScrollText.text = string.Empty;
+
+            int firstGridVisible = _browserEntries.Count == 0 ? 0 : _gridOffset + 1;
+            int lastGridVisible = Math.Min(_browserEntries.Count, _gridOffset + GridVisibleCards);
+            string gridRangeLabel = firstGridVisible + "-" + lastGridVisible + "/" + _browserEntries.Count;
+            int gridPathBudget = Math.Max(10, BrowserPathMaxUiUnits - GetUiVisualUnits(gridRangeLabel) - 4 - upUnits);
+            _browserPathText.text = EllipsizeMiddleForUi(BuildBrowserPathLabel(), gridPathBudget) + "    " + gridRangeLabel;
+
+            RefreshBrowserGridVisuals();
+            return;
+        }
+
+        SetGridVisible(false);
         int firstVisible = _browserEntries.Count == 0 ? 0 : _browserOffset + 1;
         int lastVisible = Math.Min(_browserEntries.Count, _browserOffset + BrowserVisibleRows);
         string rangeLabel = firstVisible
@@ -834,7 +990,7 @@ public sealed partial class VRWristMenuController
             + _browserEntries.Count;
         int pathBudget = Math.Max(
             10,
-            BrowserPathMaxUiUnits - GetUiVisualUnits(rangeLabel) - 4);
+            BrowserPathMaxUiUnits - GetUiVisualUnits(rangeLabel) - 4 - upUnits);
         _browserPathText.text = EllipsizeMiddleForUi(
                 BuildBrowserPathLabel(),
                 pathBudget)
@@ -875,6 +1031,8 @@ public sealed partial class VRWristMenuController
                 return L("高跟鞋：选择角色", "ハイヒール：キャラ選択", "High heels: Select character");
             case BrowserMode.SelectClothingActor:
                 return L("服装：选择角色", "服装：キャラ選択", "Clothing: Select character");
+            case BrowserMode.SelectFigureScaleActor:
+                return L("手办缩放：选择角色", "フィギュアサイズ：キャラ選択", "Figure scale: Select character");
             case BrowserMode.SelectCharacterReplaceActor:
                 return L("替换：选择场景角色", "置換：シーンのキャラを選択", "Replace: Select scene character");
             case BrowserMode.SelectCharacterRemoveActor:
@@ -902,6 +1060,7 @@ public sealed partial class VRWristMenuController
     {
         if (_browserMode == BrowserMode.SelectVmdActor
             || _browserMode == BrowserMode.SelectClothingActor
+            || _browserMode == BrowserMode.SelectFigureScaleActor
             || _browserMode == BrowserMode.SelectHighHeelsActor
             || _browserMode == BrowserMode.SelectCharacterReplaceActor
             || _browserMode == BrowserMode.SelectCharacterRemoveActor
@@ -920,6 +1079,8 @@ public sealed partial class VRWristMenuController
                 + L("  ·  已选 ", "  ·  選択 ", "  ·  Selected ")
                 + _selectedTrackedAccessorySlots.Count;
         }
+        if (IsCardPreviewBrowserMode(_browserMode))
+            return VRWristFileCatalog.BuildBreadcrumb(_browserRoot, _browserDirectory);
         if (_browserMode == BrowserMode.SelectVmdCamera)
             return L("同目录镜头", "同じフォルダーのカメラ", "Cameras in this folder");
         if (_browserMode == BrowserMode.SelectVmdRoot)
@@ -977,8 +1138,17 @@ public sealed partial class VRWristMenuController
         }
         if (entry.IsDirectory)
         {
+            if (IsCardPreviewBrowserMode(_browserMode))
+            {
+                return EllipsizeTailForUi(
+                    VRWristFileCatalog.FormatFolderBadge(entry.DisplayName),
+                    BrowserEntryMaxUiUnits);
+            }
+            string badge = _browserMode == BrowserMode.LoadVmd
+                ? VRMmdDanceRatingStore.FormatBadge(entry.DisplayName, entry.FullPath)
+                : string.Empty;
             return BuildSingleLineEntryLabel(
-                L("[目录]  ", "[フォルダー]  ", "[Folder]  "),
+                L("[目录]  ", "[フォルダー]  ", "[Folder]  ") + badge,
                 entry.DisplayName,
                 "  >");
         }
@@ -993,8 +1163,9 @@ public sealed partial class VRWristMenuController
                     : (entry.VmdMetadata.Content & VRVmdContent.Motion) != 0
                         ? L("动作", "モーション", "Motion")
                         : L("表情", "表情", "Face");
+            string badge = VRMmdDanceRatingStore.FormatBadge(entry.DisplayName, entry.FullPath);
             return BuildSingleLineEntryLabel(
-                "[" + kind + "]  ",
+                "[" + kind + "]  " + badge,
                 entry.DisplayName,
                 null);
         }
@@ -1153,6 +1324,34 @@ public sealed partial class VRWristMenuController
         return true;
     }
 
+    private bool TryAscendBrowserDirectory()
+    {
+        if (!VRWristFileCatalog.CanAscend(_browserRoot, _browserDirectory))
+            return false;
+        string parent = Path.GetDirectoryName(_browserDirectory);
+        if (string.IsNullOrEmpty(parent))
+            return false;
+        _browserDirectory = parent;
+        _browserOffset = 0;
+        _gridOffset = 0;
+        _selectedGridIndex = -1;
+        _pendingGridCardPath = null;
+        RefreshBrowserEntries();
+        return true;
+    }
+
+    private void HandleBrowserUpLevel()
+    {
+        if (_operationInProgress)
+            return;
+        if (!TryAscendBrowserDirectory())
+            return;
+        SetStatus(
+            L("已返回上一级文件夹", "上のフォルダーへ戻りました", "Moved up one folder"),
+            new Color(0.47f, 0.9f, 0.55f, 1f),
+            2f);
+    }
+
     private void HandleBrowserBack()
     {
         if (_operationInProgress)
@@ -1189,6 +1388,12 @@ public sealed partial class VRWristMenuController
                 ShowPage(WristMenuPage.Clothing);
             else
                 HandleBackToRoot();
+            return;
+        }
+
+        if (_browserMode == BrowserMode.SelectFigureScaleActor)
+        {
+            ShowPage(WristMenuPage.FigureScale);
             return;
         }
 
@@ -1267,17 +1472,8 @@ public sealed partial class VRWristMenuController
             return;
         }
 
-        if (!string.Equals(_browserDirectory, _browserRoot, StringComparison.OrdinalIgnoreCase))
-        {
-            string parent = Path.GetDirectoryName(_browserDirectory);
-            if (!string.IsNullOrEmpty(parent) && VRWristFileCatalog.IsInsideRoot(_browserRoot, parent))
-            {
-                _browserDirectory = parent;
-                _browserOffset = 0;
-                RefreshBrowserEntries();
-                return;
-            }
-        }
+        if (TryAscendBrowserDirectory())
+            return;
 
         if (_browserMode == BrowserMode.AddMale)
         {
@@ -1321,6 +1517,9 @@ public sealed partial class VRWristMenuController
         {
             _browserDirectory = entry.FullPath;
             _browserOffset = 0;
+            _gridOffset = 0;
+            _selectedGridIndex = -1;
+            _pendingGridCardPath = null;
             RefreshBrowserEntries();
             SetStatus(
                 L("当前目录：", "現在のフォルダー：", "Current folder: ") + entry.FullPath,
@@ -1351,6 +1550,9 @@ public sealed partial class VRWristMenuController
                 break;
             case BrowserMode.SelectClothingActor:
                 HandleClothingActorSelection(entry);
+                break;
+            case BrowserMode.SelectFigureScaleActor:
+                HandleFigureScaleActorSelection(entry);
                 break;
             case BrowserMode.SelectHighHeelsActor:
                 HandleHighHeelsActorSelection(entry);
@@ -1410,26 +1612,78 @@ public sealed partial class VRWristMenuController
     private string GetConfiguredVmdRoot()
     {
         ResolveSettings();
-        if (_settings == null || string.IsNullOrEmpty(_settings.VmdRootPath))
-            return null;
+        if (_settings != null && !string.IsNullOrEmpty(_settings.VmdRootPath))
+        {
+            try
+            {
+                string root = Path.GetFullPath(_settings.VmdRootPath);
+                if (Directory.Exists(root))
+                    return root;
+            }
+            catch (Exception)
+            {
+            }
+        }
 
-        try
-        {
-            string root = Path.GetFullPath(_settings.VmdRootPath);
-            return Directory.Exists(root) ? root : null;
-        }
-        catch (Exception)
-        {
-            return null;
-        }
+        if (Directory.Exists(@"E:\action"))
+            return @"E:\action";
+
+        string gameUserDataVmd = Path.Combine(VRMmdDanceRatingStore.ResolveGameRoot(), "UserData", "vmd");
+        if (Directory.Exists(gameUserDataVmd))
+            return gameUserDataVmd;
+
+        return null;
     }
 
-    private void HandleBrowserGenderSwitch()
+    private void HandleBrowserOpenClothing()
     {
-        if (_browserMode == BrowserMode.AddFemale)
-            OpenCharacterBrowser(VRCharacterCardMode.AddMale);
-        else if (_browserMode == BrowserMode.AddMale)
-            OpenCharacterBrowser(VRCharacterCardMode.AddFemale);
+        if (_operationInProgress)
+        {
+            SetStatus(
+                L("角色仍在读取，请稍候", "キャラを読込中です。しばらくお待ちください", "The character is still loading"),
+                new Color(1f, 0.72f, 0.25f, 1f),
+                4f);
+            return;
+        }
+
+        if (TryAssignCurrentClothingTarget())
+        {
+            ShowPage(WristMenuPage.Clothing);
+            return;
+        }
+
+        HandleOpenClothing();
+    }
+
+    private bool TryAssignCurrentClothingTarget()
+    {
+        int[] selected = VRVmdTargetService.GetSelectedObjectKeys();
+        if (selected.Length > 0 && TryAssignClothingTarget(selected[0]))
+            return true;
+        if (TryAssignClothingTarget(_lastAddedCharacterObjectKey))
+            return true;
+        if (TryAssignClothingTarget(_clothingTargetObjectKey))
+            return true;
+
+        string status;
+        List<VRVmdActorTarget> targets = VRVmdTargetService.GetAllTargets(out status);
+        return targets.Count == 1 && TryAssignClothingTarget(targets[0].ObjectKey);
+    }
+
+    private bool TryAssignClothingTarget(int objectKey)
+    {
+        VRVmdActorTarget target;
+        string status;
+        if (!VRVmdTargetService.TryGetTarget(objectKey, out target, out status))
+            return false;
+
+        _clothingTargetObjectKey = target.ObjectKey;
+        _clothingTargetCharacter = target.Character;
+        SetStatus(
+            L("服装目标：", "服装対象：", "Clothing target: ") + target.DisplayName,
+            new Color(0.35f, 1f, 0.62f, 1f),
+            0f);
+        return true;
     }
 
     private void OpenVmdRootPicker(bool returnToVmdBrowser, bool returnToMmdSettings = false)
@@ -1860,12 +2114,22 @@ public sealed partial class VRWristMenuController
             while (addedKeys.Length == 0 && Time.realtimeSinceStartup < deadline);
 
             if (addedKeys.Length > 0)
+            {
+                _lastAddedCharacterObjectKey = addedKeys[addedKeys.Length - 1];
                 VRMmdPlaybackController.Instance.RequestHighHeelsRefresh(addedKeys);
+            }
             else
                 VRLog.Warn("Added character did not become ready in time for automatic high-heel preset detection.");
         }
         _operationInProgress = false;
-        ShowPage(WristMenuPage.CharacterPreview);
+        if (_browserGridView && IsCardPreviewBrowserMode(_browserMode))
+        {
+            ShowPage(WristMenuPage.Browser);
+        }
+        else
+        {
+            ShowPage(WristMenuPage.CharacterPreview);
+        }
         if (success)
             VRLog.Info(status);
         SetStatus(
@@ -2633,20 +2897,35 @@ public sealed partial class VRWristMenuController
 
     private void UpdateBrowserStickScroll(SteamVR_Controller.Device rightDevice)
     {
-        if (_page != WristMenuPage.Browser || _browserEntries.Count <= BrowserVisibleRows)
+        if (_page == WristMenuPage.MmdDance)
+        {
+            UpdateMmdDanceStickScroll(rightDevice);
+            return;
+        }
+
+        if (_page != WristMenuPage.Browser || _browserEntries.Count <= 0)
         {
             _browserStickDirection = 0;
             return;
         }
 
-        float axis = rightDevice.GetAxis(EVRButtonId.k_EButton_Axis0).y;
-        int direction = axis > BrowserStickThreshold
-            ? -1
-            : axis < -BrowserStickThreshold
-                ? 1
-                : 0;
+        Vector2 stick = rightDevice.GetAxis(EVRButtonId.k_EButton_Axis0);
+        float axisY = stick.y;
+        float axisX = stick.x;
 
-        if (Mathf.Abs(axis) < BrowserStickReleaseThreshold)
+        int direction = 0;
+        if (Mathf.Abs(axisY) >= Mathf.Abs(axisX))
+        {
+            if (axisY > BrowserStickThreshold) direction = -1;
+            else if (axisY < -BrowserStickThreshold) direction = 1;
+        }
+        else
+        {
+            if (axisX < -BrowserStickThreshold) direction = -1;
+            else if (axisX > BrowserStickThreshold) direction = 1;
+        }
+
+        if (Mathf.Abs(axisY) < BrowserStickReleaseThreshold && Mathf.Abs(axisX) < BrowserStickReleaseThreshold)
         {
             _browserStickDirection = 0;
             return;
@@ -2661,13 +2940,18 @@ public sealed partial class VRWristMenuController
 
         bool changed = ScrollBrowser(direction);
         _browserStickDirection = direction;
-        _nextBrowserStickScroll = Time.unscaledTime + (changed ? 0.13f : 0.22f);
+        _nextBrowserStickScroll = Time.unscaledTime + (changed ? 0.18f : 0.22f);
         if (changed)
-            rightDevice.TriggerHapticPulse(120, EVRButtonId.k_EButton_Axis0);
+            rightDevice.TriggerHapticPulse(130, EVRButtonId.k_EButton_Axis0);
     }
 
     private bool ScrollBrowser(int direction)
     {
+        if (_browserGridView && IsCardPreviewBrowserMode(_browserMode))
+        {
+            return ScrollGridPage(direction);
+        }
+
         int maximumOffset = Math.Max(0, _browserEntries.Count - BrowserVisibleRows);
         int nextOffset = Mathf.Clamp(_browserOffset + direction, 0, maximumOffset);
         if (nextOffset == _browserOffset)

@@ -15,20 +15,26 @@ internal class GenericStandingMode : StandingMode
 	protected override VRGIN.Controls.Controller CreateLeftController()
 	{
 		var controller = base.CreateLeftController();
-		controller.gameObject.AddComponent<KksTrackedObject>();
+		KksTrackedObject.AttachHierarchy(controller.gameObject);
 		return controller;
 	}
 	protected override VRGIN.Controls.Controller CreateRightController()
 	{
 		var controller = base.CreateRightController();
-		controller.gameObject.AddComponent<KksTrackedObject>();
+		KksTrackedObject.AttachHierarchy(controller.gameObject);
 		return controller;
 	}
 #endif
-	public override IEnumerable<Type> Tools => new Type[1]
+	public override IEnumerable<Type> Tools
 	{
-		typeof(GripMoveKKCharaStudioTool)
-	};
+		get
+		{
+			return new Type[1]
+			{
+				typeof(GripMoveKKCharaStudioTool)
+			};
+		}
+	}
 
 	protected override IEnumerable<IShortcut> CreateShortcuts()
 	{
