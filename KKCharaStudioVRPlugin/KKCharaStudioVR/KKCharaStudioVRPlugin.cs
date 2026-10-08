@@ -930,6 +930,31 @@ public class KKCharaStudioVRPlugin : BaseUnityPlugin
         return true;
     }
 
+    /// <summary>
+    /// VR controller shortcut: same path as the F8 desktop shortcut, so the
+    /// change goes through the bridge and is saved to the BepInEx config.
+    /// </summary>
+    internal static bool ToggleReShadeFromShortcut()
+    {
+        if (_instance == null || _instance._desktopReShadeEnabled == null)
+            return false;
+        _instance._desktopReShadeEnabled.Value = !_instance._desktopReShadeEnabled.Value;
+        return true;
+    }
+
+    /// <summary>
+    /// VR controller shortcut: same path as the F9 desktop shortcut (bridge
+    /// request plus saved selection) instead of ReShade's own PageUp/PageDown
+    /// hotkeys, which switch both runtimes behind the bridge and are not saved.
+    /// </summary>
+    internal static bool SelectAdjacentReShadePresetFromShortcut(int direction)
+    {
+        if (_instance == null || _instance._desktopReShadePreset == null)
+            return false;
+        _instance.SelectAdjacentDesktopPreset(direction);
+        return true;
+    }
+
     internal static bool SaveReShadePreference(bool enabled, string presetPath)
     {
         return _instance != null

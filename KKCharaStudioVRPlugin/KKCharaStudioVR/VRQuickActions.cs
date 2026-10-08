@@ -892,25 +892,32 @@ public class VRQuickActions : MonoBehaviour
         return true;
     }
 
+    // The ReShade chords use the bridge and the saved BepInEx preference (the
+    // F8/F9 path). Simulated End/PageUp/PageDown keys switched ReShade behind the
+    // bridge, were never saved, and could race a bridge switch that was still
+    // loading; they remain only as a fallback when the plug-in is not ready.
     private void ToggleReShade()
     {
-        VRLog.Info("Left controller Left Joystick Click + Grip + Trigger pressed! Toggling ReShade (End key)...");
-        KeyboradSimulatorUtil.PressEndKey();
+        VRLog.Info("Left controller Left Joystick Click + Grip + Trigger pressed! Toggling ReShade...");
+        if (!KKCharaStudioVRPlugin.ToggleReShadeFromShortcut())
+            KeyboradSimulatorUtil.PressEndKey();
     }
 
     private void NextReShadePreset()
     {
-        VRLog.Info("Left controller Left Joystick Click + Grip + Menu pressed! Cycling ReShade preset (PageDown key)...");
-        KeyboradSimulatorUtil.PressPageDown();
+        VRLog.Info("Left controller Left Joystick Click + Grip + Menu pressed! Cycling ReShade preset...");
+        CycleNextReShadePreset();
     }
 
     public static void CycleNextReShadePreset()
     {
-        KeyboradSimulatorUtil.PressPageDown();
+        if (!KKCharaStudioVRPlugin.SelectAdjacentReShadePresetFromShortcut(1))
+            KeyboradSimulatorUtil.PressPageDown();
     }
 
     public static void CyclePrevReShadePreset()
     {
-        KeyboradSimulatorUtil.PressPageUp();
+        if (!KKCharaStudioVRPlugin.SelectAdjacentReShadePresetFromShortcut(-1))
+            KeyboradSimulatorUtil.PressPageUp();
     }
 }
