@@ -584,6 +584,9 @@ internal class KKCharaStudioInterpreter : GameInterpreter
 				camera.layerCullSpherical = val.layerCullSpherical;
 				camera.useOcclusionCulling = val.useOcclusionCulling;
 				camera.allowHDR = val.allowHDR;
+				// Studio may have rebuilt or reset its camera; restore the saved
+				// wrist-menu background before copying it to the VR camera.
+				VRStudioSettingsService.ApplySavedBackgroundPreset();
 				camera.backgroundColor = val.backgroundColor;
 				Skybox component = ((Component)val).GetComponent<Skybox>();
 				if (component != null)

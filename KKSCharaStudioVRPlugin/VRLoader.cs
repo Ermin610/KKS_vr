@@ -115,6 +115,7 @@ internal sealed class VRLoader : MonoBehaviour
         root.AddComponent<VRTimelineCameraFollowController>();
         root.AddComponent<VRComfortVignette>();
         root.AddComponent<VRCameraPerformance>();
+        root.AddComponent<VRBackgroundPresetKeeper>();
         root.AddComponent<VRTwoHandScale>();
         root.AddComponent<VRPhysicalUndresser>();
         DontDestroyOnLoad(VRCamera.Instance.gameObject);

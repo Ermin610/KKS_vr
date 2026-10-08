@@ -4,7 +4,7 @@ using KK_VR_CameraSync;
 using UnityEngine;
 using Valve.VR;
 
-static class Program
+static partial class Program
 {
     private static int checks;
     private static void Check(bool value, string message)
@@ -21,6 +21,7 @@ static class Program
     {
         Mapping();
         Input();
+        BackgroundPresetPolicyChecks();
         Timeline();
         CardGridAndLruCache();
         ThumbnailDiskCacheAndBrowserLayout();

@@ -93,6 +93,56 @@ internal static class VRStudioSettingsService
         return applied;
     }
 
+    /// <summary>Saved wrist-menu background preset, or Unset.</summary>
+    public static int GetSavedBackgroundPresetIndex()
+    {
+        KKCharaStudioVRSettings settings = VRInteractionOptions.Settings;
+        return settings == null
+            ? VRBackgroundPresetPolicy.Unset
+            : VRBackgroundPresetPolicy.NormalizeSaved(settings.BackgroundPresetIndex, BackgroundPresets.Length);
+    }
+
+    /// <summary>Stores the preset in the VR settings XML so it survives a restart.</summary>
+    public static bool SaveBackgroundPreset(int index)
+    {
+        KKCharaStudioVRSettings settings = VRInteractionOptions.Settings;
+        if (settings == null)
+            return false;
+        try
+        {
+            settings.BackgroundPresetIndex = VRBackgroundPresetPolicy.NormalizeSaved(index, BackgroundPresets.Length);
+            settings.Save();
+            return true;
+        }
+        catch (System.Exception exception)
+        {
+            VRLog.Error("Unable to save background preset: " + exception.Message);
+            return false;
+        }
+    }
+
+    /// <summary>Re-applies the saved preset, if any, to the current cameras.</summary>
+    public static bool ApplySavedBackgroundPreset()
+    {
+        int saved = GetSavedBackgroundPresetIndex();
+        if (!VRBackgroundPresetPolicy.HasSavedPreset(saved, BackgroundPresets.Length))
+            return false;
+        string ignored;
+        return SetBackgroundPreset(saved, out ignored);
+    }
+
+    public static bool TryGetBackgroundCameraIds(out int studioCameraId, out int vrCameraId)
+    {
+        studioCameraId = 0;
+        vrCameraId = 0;
+        Studio.Studio studio = Singleton<Studio.Studio>.Instance;
+        if (studio != null && studio.cameraCtrl != null && studio.cameraCtrl.mainCmaera != null)
+            studioCameraId = studio.cameraCtrl.mainCmaera.GetInstanceID();
+        if (VR.Camera != null && VR.Camera.SteamCam != null && VR.Camera.SteamCam.camera != null)
+            vrCameraId = VR.Camera.SteamCam.camera.GetInstanceID();
+        return studioCameraId != 0;
+    }
+
     public static int FindClosestBackgroundPreset()
     {
         Color current = BackgroundPresets[0];

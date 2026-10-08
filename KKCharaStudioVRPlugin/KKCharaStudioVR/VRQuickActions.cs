@@ -786,6 +786,19 @@ public class VRQuickActions : MonoBehaviour
         PullIkGuideVisible();
         SetIkGuideVisible(!ikVisible);
         VRLog.Info("Toggled IK guide renderers to: " + ikVisible + " (colliders stay enabled)");
+        // Persist the user's choice; SetIkGuideVisible only changes memory.
+        KKCharaStudioVRSettings settings = VRInteractionOptions.Settings;
+        if (settings != null)
+        {
+            try
+            {
+                settings.Save();
+            }
+            catch (Exception exception)
+            {
+                VRLog.Error("Unable to save IK guide visibility: " + exception.Message);
+            }
+        }
     }
 
     internal static void ApplyIkGuideVisibility()

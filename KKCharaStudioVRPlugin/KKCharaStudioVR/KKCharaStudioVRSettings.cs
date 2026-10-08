@@ -610,4 +610,13 @@ public class KKCharaStudioVRSettings : VRSettings
 		return VRMmdCueSheetStore.NormalizePresetId(value);
 	}
 
+	private int _BackgroundPresetIndex = VRBackgroundPresetPolicy.Unset;
+
+	[XmlComment("Background colour preset chosen in the VR wrist menu (0-5, 5 = green screen); -1 keeps Studio's own background")]
+	public int BackgroundPresetIndex
+	{
+		get { return _BackgroundPresetIndex; }
+		set { _BackgroundPresetIndex = value; TriggerPropertyChanged("BackgroundPresetIndex"); }
+	}
+
 }
