@@ -1,10 +1,12 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$GameDir,
-    [string]$CameraSyncRepo = (Join-Path $PSScriptRoot 'CameraSync'),
-    [string]$OutputDirectory = (Join-Path $PSScriptRoot 'output\KKS-VR-Overhaul-0.4.0-preview2')
+    [string]$CameraSyncRepo,
+    [string]$OutputDirectory
 )
 $ErrorActionPreference = 'Stop'
+if (!$CameraSyncRepo) { $CameraSyncRepo = Join-Path $PSScriptRoot 'CameraSync' }
+if (!$OutputDirectory) { $OutputDirectory = Join-Path $PSScriptRoot 'output\KKS-VR-Overhaul-0.01' }
 $game = [IO.Path]::GetFullPath($GameDir).TrimEnd('\')
 $stage = [IO.Path]::GetFullPath($OutputDirectory).TrimEnd('\')
 if ($stage -eq $game -or $stage.StartsWith($game + '\', [StringComparison]::OrdinalIgnoreCase) -or $game.StartsWith($stage + '\', [StringComparison]::OrdinalIgnoreCase)) {
