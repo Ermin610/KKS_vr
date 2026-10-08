@@ -1564,6 +1564,54 @@ internal static class VRMmddService
             + "from KKCharaStudioVR import VRMmddStateBridge\n";
     }
 
+    // Diagnostics only: why DirectVrCameraOwner is false. Any failure is
+    // swallowed so it can never block the playback report or transport.
+    // Expects `game` and `mmdd` in scope.
+    private static string BuildCameraDiagnosticsCode()
+    {
+        return
+            "try:\n"
+            + "    kkvr_cam_total = 0\n"
+            + "    kkvr_cam_enabled = 0\n"
+            + "    kkvr_cam_bound = 0\n"
+            + "    kkvr_cam_vr = 0\n"
+            + "    for kkvr_cam in getattr(mmdd, 'cameraControllers', []):\n"
+            + "        kkvr_cam_total += 1\n"
+            + "        if bool(getattr(kkvr_cam, 'enable', True)):\n"
+            + "            kkvr_cam_enabled += 1\n"
+            + "        if getattr(kkvr_cam, 'bindCameraTrans', None) is not None:\n"
+            + "            kkvr_cam_bound += 1\n"
+            + "        if getattr(kkvr_cam, 'vrOriginTransform', None) is not None:\n"
+            + "            kkvr_cam_vr += 1\n"
+            + "    kkvr_studio = getattr(game, 'studio', None)\n"
+            + "    VRMmddStateBridge.ReportCameraDiagnostics(kkvr_studio is not None and getattr(kkvr_studio, 'ociCamera', None) is not None, kkvr_cam_total, kkvr_cam_enabled, kkvr_cam_bound, kkvr_cam_vr)\n"
+            + "except:\n"
+            + "    pass\n";
+    }
+
+    /// <summary>
+    /// One-shot camera diagnostics for playback started from MMDD's own UI.
+    /// Does not start MMDD and does not change playback.
+    /// </summary>
+    public static bool RefreshCameraDiagnostics(out string status)
+    {
+        string code =
+            "from vngameengine import vnge_game\n"
+            + BuildStateBridgeImportCode()
+            + "game = vnge_game\n"
+            + "game_data = getattr(game, 'gdata', None) if game is not None else None\n"
+            + "mmdd = getattr(game_data, 'mmdd', None) if game_data is not None else None\n"
+            + BuildCameraDiagnosticsCode();
+        string error;
+        if (VRPythonBridge.TryExecute(code, "MMDD camera diagnostics", out error))
+        {
+            status = null;
+            return true;
+        }
+        status = error;
+        return false;
+    }
+
     private static string BuildImmediatePlaybackReportCode()
     {
         return
@@ -1579,6 +1627,7 @@ internal static class VRMmddService
             + "                break\n"
             + "except:\n"
             + "    direct_vr_camera_owner = False\n"
+            + BuildCameraDiagnosticsCode()
             + "VRMmddStateBridge.ReportPlayback(True, bool(mmdd.isPlaying), float(mmdd.curFrame), float(mmdd.StartFrame), float(mmdd.EndFrame), playback_generation, direct_vr_camera_owner)\n";
     }
 

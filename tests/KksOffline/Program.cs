@@ -4,7 +4,7 @@ using KK_VR_CameraSync;
 using UnityEngine;
 using Valve.VR;
 
-static class Program
+static partial class Program
 {
     private static int checks;
     private static void Check(bool value, string message)
@@ -32,6 +32,7 @@ static class Program
         ReviewRegressions();
         ClothingPresetHitTest();
         MmdFreeLocomotion();
+        MmdPresentationPolicyChecks();
         FigureScale();
         MmdPoseSanitize();
         Console.WriteLine($"PASS: {checks} offline assertions against linked production input/Timeline/card grid/MMD trim/ratings code.");
