@@ -37,10 +37,13 @@ namespace
     // A switch that never finishes loading is released after this long so a
     // newer request is not blocked forever.
     constexpr ULONGLONG kPresetLoadTimeoutMs = 60000;
-    // A runtime that reports no loaded techniques for this long is treated as
-    // having no effects at all. It is skipped instead of being switched, because
-    // switching it would overwrite the old preset with an empty technique list.
-    constexpr ULONGLONG kEmptyRuntimeGiveUpMs = 30000;
+    // A runtime that still reports no techniques this long after ReShade said
+    // loading finished (event 84) has no effects at all. It is skipped instead
+    // of being switched, because switching it would overwrite the old preset
+    // with an empty technique list. Without that event (for example a runtime
+    // discovered late) the longer limit applies.
+    constexpr ULONGLONG kEmptyAfterLoadGiveUpMs = 10000;
+    constexpr ULONGLONG kEmptyRuntimeGiveUpMs = 120000;
 
     using effect_runtime = reshade::api::effect_runtime;
     using register_addon_fn = bool (*)(void *, uint32_t);
@@ -70,6 +73,9 @@ namespace
         // "loading" or "no effects".
         size_t technique_count = 0;
         ULONGLONG empty_since_tick = 0;
+        // Set by event 84 (ReShade finished loading and applied the preset),
+        // cleared by event 78 (reload started) and by our own preset switch.
+        bool load_finished = false;
     };
 
     HMODULE g_module = nullptr;
@@ -114,9 +120,11 @@ namespace
 
     bool is_runtime_empty_for_long_unlocked(const RuntimeState &state, ULONGLONG now)
     {
-        return state.technique_count == 0
-            && state.empty_since_tick != 0
-            && now - state.empty_since_tick >= kEmptyRuntimeGiveUpMs;
+        if (state.technique_count != 0 || state.empty_since_tick == 0)
+            return false;
+        const ULONGLONG empty_for = now - state.empty_since_tick;
+        return empty_for >= kEmptyRuntimeGiveUpMs
+            || (state.load_finished && empty_for >= kEmptyAfterLoadGiveUpMs);
     }
 
     // True while another active runtime is loading effects or applying an
@@ -275,6 +283,7 @@ namespace
         const std::lock_guard<std::mutex> lock(g_mutex);
         if (RuntimeState *state = find_runtime_unlocked(runtime))
         {
+            state->load_finished = false;
             // ReShade 6.7.1 raises this event at the beginning of a reload.
             // Keep the request pending until event 84 confirms that the preset
             // was loaded and applied after compilation finished.
@@ -292,6 +301,7 @@ namespace
         if (RuntimeState *state = find_runtime_unlocked(runtime))
         {
             state->preset_path = path != nullptr ? path : "";
+            state->load_finished = true;
             if (!g_desired_preset_path.empty()
                 && _stricmp(state->preset_path.c_str(), g_desired_preset_path.c_str()) == 0)
             {
@@ -435,6 +445,7 @@ namespace
                             state->preset_request_present_serial = state->present_serial;
                             state->preset_reload_in_progress = false;
                             state->preset_request_tick = now;
+                            state->load_finished = false;
                             log_text = std::string("KKVR bridge: switching ")
                                 + (state->is_vr ? "VR" : "desktop")
                                 + " runtime from \"" + state->preset_path
