@@ -281,6 +281,7 @@ public class KKCharaStudioVRSettings : VRSettings
 	private bool _ComfortVignetteEnabled = true;
 	private float _ComfortVignetteRadius = 0.5f;
 	private bool _TwoHandScaleEnabled = true;
+	private bool _DesktopCoverEnabled;
 	private bool _WristMenuEnabled = true;
 	private float _WristMenuScale = 1.0f;
 	private string _WristMenuLanguage = "zh-CN";
@@ -320,6 +321,13 @@ public class KKCharaStudioVRSettings : VRSettings
 	{
 		get { return _TwoHandScaleEnabled; }
 		set { _TwoHandScaleEnabled = value; TriggerPropertyChanged("TwoHandScaleEnabled"); }
+	}
+
+	[XmlComment("Privacy mode: black out the desktop window while in VR (toggle with Space)")]
+	public bool DesktopCoverEnabled
+	{
+		get { return _DesktopCoverEnabled; }
+		set { _DesktopCoverEnabled = value; TriggerPropertyChanged("DesktopCoverEnabled"); }
 	}
 
 	[XmlComment("Enable the compact left-wrist quick menu")]
