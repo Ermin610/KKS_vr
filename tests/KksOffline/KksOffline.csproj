@@ -10,6 +10,7 @@
     <Compile Include="..\..\KKSCharaStudioVRPlugin\SteamVR_Controller.cs" Link="Production\SteamVR_Controller.cs" />
     <Compile Include="$(CameraSyncRepo)\KksTimelineCompatibility.cs" Link="Production\KksTimelineCompatibility.cs" />
     <Compile Include="..\..\KKCharaStudioVRPlugin\KKCharaStudioVR\VRCardThumbnailCache.cs" Link="Production\VRCardThumbnailCache.cs" />
+    <Compile Include="..\..\KKCharaStudioVRPlugin\KKCharaStudioVR\VRDesktopCoverPolicy.cs" Link="Production\VRDesktopCoverPolicy.cs" />
     <Compile Include="..\..\KKCharaStudioVRPlugin\KKCharaStudioVR\VRMirrorObliquePolicy.cs" Link="Production\VRMirrorObliquePolicy.cs" />
     <Compile Include="..\..\KKCharaStudioVRPlugin\KKCharaStudioVR\VRMirrorStereoPolicy.cs" Link="Production\VRMirrorStereoPolicy.cs" />
     <Compile Include="..\..\KKCharaStudioVRPlugin\KKCharaStudioVR\VRWristFileCatalog.cs" Link="Production\VRWristFileCatalog.cs" />

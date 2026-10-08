@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using UnityEngine;
 using Object = UnityEngine.Object;
 using VRUtil;
@@ -13,8 +14,9 @@ public class KKCharaStudioVRGUI : MonoBehaviour
 	private Rect windowRect = new Rect((float)(Screen.width - 250), (float)(Screen.height - 400), 250f, 10f);
 	private string windowTitle = "KKCharaStudioVR Settings";
 
-	private bool _desktopCoverEnabled = true;
-	private Camera _coverCamera;
+	private bool _desktopCoverEnabled;
+	private Coroutine _coverRoutine;
+	private static readonly WaitForEndOfFrame EndOfFrame = new WaitForEndOfFrame();
 	private GUIStyle _buttonStyle;
 	private GUIStyle _labelStyle;
 	private GUIStyle _toggleStyle;
@@ -24,72 +26,123 @@ public class KKCharaStudioVRGUI : MonoBehaviour
 
 	private void Start()
 	{
-		// A black cover camera in front of the game view also blacks the floating
-		// studio panel when that view is what the GUI quad samples.
-		SetDesktopCover(false);
+		// Privacy mode is a saved setting, so it survives closing Studio.
+		KKCharaStudioVRSettings settings = GetSettings();
+		bool enabled = VRDesktopCoverPolicy.ResolveInitialState(
+			settings != null,
+			settings != null && settings.DesktopCoverEnabled);
+		SetDesktopCover(enabled, false);
+		VRLog.Info("Desktop cover restored from settings: " + (enabled ? "on" : "off"));
 	}
 
 	private void Update()
 	{
-		if (Input.GetKeyDown(KeyCode.Space))
+		if (VRDesktopCoverPolicy.ShouldToggleFromKey(Input.GetKeyDown(KeyCode.Space), IsTextInputFocused()))
 		{
-			SetDesktopCover(!_desktopCoverEnabled);
+			SetDesktopCover(!_desktopCoverEnabled, true);
 		}
 	}
 
 	private void OnDestroy()
 	{
-		if (_coverCamera != null && _coverCamera.gameObject != null)
+		if (_coverRoutine != null)
 		{
-			Destroy(_coverCamera.gameObject);
+			StopCoroutine(_coverRoutine);
+			_coverRoutine = null;
 		}
 	}
 
-	private void SetDesktopCover(bool enabled)
+	private static KKCharaStudioVRSettings GetSettings()
+	{
+		try
+		{
+			return VR.Manager != null && VR.Manager.Context != null
+				? VR.Manager.Context.Settings as KKCharaStudioVRSettings
+				: null;
+		}
+		catch
+		{
+			return null;
+		}
+	}
+
+	private static bool IsTextInputFocused()
+	{
+		UnityEngine.EventSystems.EventSystem eventSystem = UnityEngine.EventSystems.EventSystem.current;
+		GameObject selected = eventSystem != null ? eventSystem.currentSelectedGameObject : null;
+		if (selected == null)
+			return false;
+		UnityEngine.UI.InputField input = selected.GetComponent<UnityEngine.UI.InputField>();
+		if (input != null)
+			return input.isFocused;
+		// TextMeshPro input fields, without a compile-time TMPro reference.
+		Component[] components = selected.GetComponents<Component>();
+		for (int i = 0; i < components.Length; i++)
+		{
+			if (components[i] != null && components[i].GetType().Name == "TMP_InputField")
+				return true;
+		}
+		return false;
+	}
+
+	private void SetDesktopCover(bool enabled, bool persist)
 	{
 		_desktopCoverEnabled = enabled;
-		if (_coverCamera == null && enabled)
+
+		// The cover used to be a full-screen black Camera at depth 99999. A camera
+		// joins the frame's camera stack, so whatever samples the game view (the
+		// floating Studio panel in some KKS setups) was blacked out with it and the
+		// VR UI could not be used while privacy mode was on. Painting black at the
+		// end of the frame touches only the desktop back buffer, after every eye
+		// texture and GUI texture of that frame has been rendered.
+		if (enabled && _coverRoutine == null)
 		{
-			CreateCoverCamera();
-		}
-		if (_coverCamera != null)
-		{
-			_coverCamera.enabled = enabled;
+			_coverRoutine = StartCoroutine(PaintDesktopCover());
 		}
 
 		try
 		{
 #if KKS
-			UnityEngine.XR.XRSettings.showDeviceView = !enabled;
+			UnityEngine.XR.XRSettings.showDeviceView = VRDesktopCoverPolicy.ShowDeviceView(enabled);
 #else
-			UnityEngine.VR.VRSettings.showDeviceView = !enabled;
+			UnityEngine.VR.VRSettings.showDeviceView = VRDesktopCoverPolicy.ShowDeviceView(enabled);
 #endif
 		}
 		catch (Exception e)
 		{
 			VRLog.Warn($"Failed to set showDeviceView: {e.Message}");
 		}
+
+		if (!persist)
+			return;
+		KKCharaStudioVRSettings settings = GetSettings();
+		if (settings == null)
+			return;
+		try
+		{
+			settings.DesktopCoverEnabled = enabled;
+			settings.Save();
+			VRLog.Info("Desktop cover " + (enabled ? "enabled" : "disabled") + " and saved");
+		}
+		catch (Exception e)
+		{
+			VRLog.Warn("Desktop cover state could not be saved: " + e.Message);
+		}
 	}
 
-	private void CreateCoverCamera()
+	private IEnumerator PaintDesktopCover()
 	{
-		// The name contains VRGIN so GameInterpreter.JudgeCamera ignores it.
-		// Otherwise this black full-screen camera is adopted as a VR slave.
-		GameObject camObj = new GameObject("VRGIN_DesktopCoverCamera");
-		GameObject.DontDestroyOnLoad(camObj);
-
-		_coverCamera = camObj.AddComponent<Camera>();
-		_coverCamera.depth = 99999f;
-		_coverCamera.clearFlags = CameraClearFlags.Color;
-		_coverCamera.backgroundColor = Color.black;
-		_coverCamera.cullingMask = 0; // Render nothing
-		_coverCamera.allowHDR = false;
-		_coverCamera.allowMSAA = false;
-		_coverCamera.useOcclusionCulling = false;
-		_coverCamera.stereoTargetEye = StereoTargetEyeMask.None; // Desktop only, never render to VR eyes
-		_coverCamera.eventMask = 0;
-		_coverCamera.depthTextureMode = DepthTextureMode.None;
-		_coverCamera.enabled = false;
+		while (_desktopCoverEnabled)
+		{
+			yield return EndOfFrame;
+			if (!_desktopCoverEnabled)
+				break;
+			RenderTexture previous = RenderTexture.active;
+			RenderTexture.active = null;
+			GL.Clear(true, true, Color.black);
+			RenderTexture.active = previous;
+		}
+		_coverRoutine = null;
 	}
 
 	private void OnGUI()
@@ -324,9 +377,9 @@ public class KKCharaStudioVRGUI : MonoBehaviour
 				Header("--- 高级设置 ---");
 				settings.TwoHandScaleEnabled = Toggle(settings.TwoHandScaleEnabled, "Two-Hand World Scale");
 
-				if (Button(_desktopCoverEnabled ? "Restore Desktop View (Space)" : "Cover Desktop View (Space)"))
+				if (Button(VRDesktopCoverPolicy.ButtonLabel(_desktopCoverEnabled)))
 				{
-					SetDesktopCover(!_desktopCoverEnabled);
+					SetDesktopCover(!_desktopCoverEnabled, true);
 				}
 
 				GUILayout.Space(10);
