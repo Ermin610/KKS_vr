@@ -11,6 +11,7 @@
     <Compile Include="$(CameraSyncRepo)\KksTimelineCompatibility.cs" Link="Production\KksTimelineCompatibility.cs" />
     <Compile Include="..\..\KKCharaStudioVRPlugin\KKCharaStudioVR\VRCardThumbnailCache.cs" Link="Production\VRCardThumbnailCache.cs" />
     <Compile Include="..\..\KKCharaStudioVRPlugin\KKCharaStudioVR\VRMirrorObliquePolicy.cs" Link="Production\VRMirrorObliquePolicy.cs" />
+    <Compile Include="..\..\KKCharaStudioVRPlugin\KKCharaStudioVR\VRBackgroundPresetPolicy.cs" Link="Production\VRBackgroundPresetPolicy.cs" />
     <Compile Include="..\..\KKCharaStudioVRPlugin\KKCharaStudioVR\VRMirrorStereoPolicy.cs" Link="Production\VRMirrorStereoPolicy.cs" />
     <Compile Include="..\..\KKCharaStudioVRPlugin\KKCharaStudioVR\VRWristFileCatalog.cs" Link="Production\VRWristFileCatalog.cs" />
     <Compile Include="..\..\KKCharaStudioVRPlugin\KKCharaStudioVR\VRMmdDanceRatingStore.cs" Link="Production\VRMmdDanceRatingStore.cs" />

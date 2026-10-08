@@ -283,6 +283,7 @@ namespace KKCharaStudioVR
 				(object)("Scene loaded successfully (generation " + generation
 					+ "). Starting post-load recovery."));
 			RequestVRRecovery("scene load completed");
+			VRBackgroundPresetKeeper.RequestReapply();
 			if (VR.Active)
 				studio.StartCoroutine(AlignVRCameraAfterLoadCo(generation));
 		}

@@ -171,6 +171,20 @@ public sealed partial class VRWristMenuController
         }
     }
 
+    // These toggles used to change the in-memory settings only, so they were
+    // lost on restart unless another menu happened to save the file later.
+    private static void TrySaveToggledSettings(KKCharaStudioVRSettings settings)
+    {
+        try
+        {
+            settings.Save();
+        }
+        catch (System.Exception exception)
+        {
+            VRGIN.Core.VRLog.Error("Unable to save VR settings: " + exception.Message);
+        }
+    }
+
     private void HandleToggleKneadTouch()
     {
         KKCharaStudioVRSettings settings = VRInteractionOptions.Settings;
@@ -180,6 +194,7 @@ public sealed partial class VRWristMenuController
             return;
         }
         settings.DynamicTouchEnabled = !settings.DynamicTouchEnabled;
+        TrySaveToggledSettings(settings);
         RefreshIkPage();
         SetStatus(
             settings.DynamicTouchEnabled
@@ -198,6 +213,7 @@ public sealed partial class VRWristMenuController
             return;
         }
         settings.PhysicalUndressEnabled = !settings.PhysicalUndressEnabled;
+        TrySaveToggledSettings(settings);
         RefreshIkPage();
         SetStatus(
             settings.PhysicalUndressEnabled
@@ -216,6 +232,7 @@ public sealed partial class VRWristMenuController
             return;
         }
         settings.FigurePosingMode = !settings.FigurePosingMode;
+        TrySaveToggledSettings(settings);
         RefreshIkPage();
         SetStatus(
             settings.FigurePosingMode

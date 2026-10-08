@@ -1836,7 +1836,12 @@ public sealed partial class VRWristMenuController
     private void HandleBackgroundPreset(int preset)
     {
         string status;
-        ReportSettingsResult(VRStudioSettingsService.SetBackgroundPreset(preset, out status), status);
+        bool applied = VRStudioSettingsService.SetBackgroundPreset(preset, out status);
+        // The colour lives on the camera objects; remember the choice so it is
+        // re-applied after a restart, a scene load or a VR camera reset.
+        if (applied && !VRStudioSettingsService.SaveBackgroundPreset(preset))
+            status += L("（未保存）", "（未保存）", " (not saved)");
+        ReportSettingsResult(applied, status);
         RefreshSettingsPage();
     }
 
