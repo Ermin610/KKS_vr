@@ -51,6 +51,18 @@ internal static class VRReShadeRuntimeService
     private static string _lastBridgeError = string.Empty;
     private static string _gameRoot = string.Empty;
 
+    // Loaded modules never unload while Studio runs. Remember them once found
+    // so the 4 Hz wrist-menu refresh does not enumerate every process module
+    // on the main thread each time.
+    private static IntPtr _reshadeModule = IntPtr.Zero;
+    private static IntPtr _bridgeModule = IntPtr.Zero;
+
+    // The wrist menu asks for the catalog several times per refresh. Reuse a
+    // scan for a moment instead of re-reading every preset file each call.
+    private const double PresetCatalogCacheSeconds = 1.0;
+    private static List<string> _presetCatalog;
+    private static DateTime _presetCatalogScannedUtc = DateTime.MinValue;
+
     [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
     private static extern IntPtr GetProcAddress(IntPtr module, string procedureName);
 
@@ -98,7 +110,7 @@ internal static class VRReShadeRuntimeService
 
         // ReShade add-ons must register during ReShade startup. Never late-load
         // this DLL after the runtime initialization events have already passed.
-        if (FindLoadedModuleWithExports("KKVR_ReShade_GetBridgeVersion") == IntPtr.Zero)
+        if (!IsBridgeLoaded())
         {
             snapshot.ConnectionState = VRReShadeConnectionState.BridgeUnavailable;
             snapshot.Detail = "Bridge is installed but was not loaded at startup; restart CharaStudio";
@@ -205,8 +217,10 @@ internal static class VRReShadeRuntimeService
             return false;
         }
 
-        WriteConfiguredPresetPath(presetPath);
-
+        // Do not rewrite ReShade.ini / ReShadeVR.ini while the bridge drives the
+        // runtimes. ReShade keeps those files cached and refuses to save a file
+        // that changed on disk behind its back, and a live rewrite also races its
+        // own loader. ReShade persists PresetPath itself after a switch.
         if (CanIssueBridgeRequest(snapshot, out detail))
         {
             try
@@ -217,9 +231,15 @@ internal static class VRReShadeRuntimeService
                     detail = result == -2
                         ? "Preset file is no longer available"
                         : "ReShade bridge rejected the request (" + result + ")";
+                    VRLog.Warn("ReShade preset request rejected: " + presetPath + " (" + detail + ")");
                     return false;
                 }
                 queuedUntilRuntime = result == 2;
+                VRLog.Info("ReShade preset requested: " + presetPath
+                    + (queuedUntilRuntime ? " (queued until a ReShade view renders)" : string.Empty)
+                    + "; runtimes=" + snapshot.RuntimeCount + ", vr=" + snapshot.VRRuntimeCount
+                    + ", previous=" + snapshot.PresetPath
+                    + (snapshot.RequestPending ? ", previous request still pending" : string.Empty));
                 return true;
             }
             catch (Exception ex)
@@ -230,6 +250,9 @@ internal static class VRReShadeRuntimeService
             }
         }
 
+        // Bridge unavailable: the running ReShade cannot be switched live, so
+        // leave the path for ReShade's next start instead.
+        WriteConfiguredPresetPath(presetPath);
         detail = "Preset path saved to ReShade config";
         return true;
     }
@@ -290,13 +313,26 @@ internal static class VRReShadeRuntimeService
 
     internal static List<string> GetPresetFiles()
     {
-        // Deliberately rescan on every request. Preset files are commonly added
-        // while Studio is running and the catalog is small enough that a
-        // top-level directory scan is cheaper and safer than a stale cache.
+        // Preset files are commonly added while Studio is running, so the scan
+        // is only reused for about a second. That still avoids opening every
+        // preset file several times per wrist-menu refresh while ReShade may be
+        // writing one of them.
+        List<string> cached = _presetCatalog;
+        double age = (DateTime.UtcNow - _presetCatalogScannedUtc).TotalSeconds;
+        if (cached != null && age >= 0 && age < PresetCatalogCacheSeconds)
+            return new List<string>(cached);
         return RefreshPresetFiles();
     }
 
     internal static List<string> RefreshPresetFiles()
+    {
+        List<string> result = ScanPresetFiles();
+        _presetCatalog = new List<string>(result);
+        _presetCatalogScannedUtc = DateTime.UtcNow;
+        return result;
+    }
+
+    private static List<string> ScanPresetFiles()
     {
         var result = new List<string>();
         try
@@ -410,7 +446,16 @@ internal static class VRReShadeRuntimeService
 
     private static bool IsReShadeLoaded()
     {
-        return FindLoadedModuleWithExports("ReShadeVersion", "ReShadeRegisterAddon") != IntPtr.Zero;
+        if (_reshadeModule == IntPtr.Zero)
+            _reshadeModule = FindLoadedModuleWithExports("ReShadeVersion", "ReShadeRegisterAddon");
+        return _reshadeModule != IntPtr.Zero;
+    }
+
+    private static bool IsBridgeLoaded()
+    {
+        if (_bridgeModule == IntPtr.Zero)
+            _bridgeModule = FindLoadedModuleWithExports("KKVR_ReShade_GetBridgeVersion");
+        return _bridgeModule != IntPtr.Zero;
     }
 
     private static IntPtr FindLoadedModuleWithExports(params string[] exportNames)
@@ -709,7 +754,7 @@ internal static class VRReShadeRuntimeService
         try
         {
             bool inSection = false;
-            foreach (string rawLine in File.ReadAllLines(path))
+            foreach (string rawLine in ReadAllLinesShared(path))
             {
                 string line = rawLine.Trim();
                 if (line.Length == 0 || line[0] == ';' || line[0] == '#')
@@ -735,6 +780,25 @@ internal static class VRReShadeRuntimeService
             VRLog.Error("Unable to read ReShade configuration '" + path + "': " + ex.Message);
         }
         return string.Empty;
+    }
+
+    // ReShade opens its INI files for writing with deny-write sharing. A plain
+    // File.ReadAllLines only allows other readers, so reading a preset at the
+    // moment ReShade saves it either fails here (the preset briefly looks
+    // missing and the saved selection can be migrated away) or makes ReShade's
+    // own save fail. Allow concurrent writers instead.
+    private static string[] ReadAllLinesShared(string path)
+    {
+        var lines = new List<string>();
+        using (var stream = new FileStream(
+                   path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        using (var reader = new StreamReader(stream, Encoding.UTF8, true))
+        {
+            string line;
+            while ((line = reader.ReadLine()) != null)
+                lines.Add(line);
+        }
+        return lines.ToArray();
     }
 
     private static string ResolveExistingPresetPath(string path)
@@ -794,7 +858,7 @@ internal static class VRReShadeRuntimeService
         try
         {
             // Every ReShade preset contains either Techniques/TechniqueSorting or [*.fx] section headers
-            foreach (string rawLine in File.ReadAllLines(path))
+            foreach (string rawLine in ReadAllLinesShared(path))
             {
                 string line = rawLine.Trim();
                 if (line.Length == 0 || line[0] == ';' || line[0] == '#')

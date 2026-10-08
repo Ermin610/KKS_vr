@@ -1,6 +1,16 @@
 // A tiny native bridge between the managed KK VR wrist menu and ReShade's
 // official add-on API. Requests arrive on Unity's main thread and are applied
 // from each ReShade runtime's own reshade_present callback.
+//
+// Preset switches are gated: effect_runtime::set_current_preset_path() first
+// writes the runtime's *current* technique state into the *old* preset file.
+// Calling it while a runtime is still (re)loading effects writes an empty or
+// partial technique list into that preset (the "preset content was cleared"
+// report), and in VR, where a desktop and a VR runtime share ReShade's preset
+// INI cache, it can write an INI that the other runtime's loader threads are
+// reading at the same time (a crash). A preset is therefore only applied to a
+// runtime that has finished loading, and only while no other active runtime is
+// loading or still applying an earlier switch.
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -24,11 +34,20 @@ namespace
     constexpr uint32_t kEventSetCurrentPresetPath = 84;
     constexpr uint32_t kEventSetEffectsState = 94;
 
+    // A switch that never finishes loading is released after this long so a
+    // newer request is not blocked forever.
+    constexpr ULONGLONG kPresetLoadTimeoutMs = 60000;
+    // A runtime that reports no loaded techniques for this long is treated as
+    // having no effects at all. It is skipped instead of being switched, because
+    // switching it would overwrite the old preset with an empty technique list.
+    constexpr ULONGLONG kEmptyRuntimeGiveUpMs = 30000;
+
     using effect_runtime = reshade::api::effect_runtime;
     using register_addon_fn = bool (*)(void *, uint32_t);
     using unregister_addon_fn = void (*)(void *);
     using register_event_fn = void (*)(uint32_t, void *);
     using unregister_event_fn = void (*)(uint32_t, void *);
+    using log_message_fn = void (*)(void *, int, const char *);
 
     struct RuntimeState
     {
@@ -46,6 +65,11 @@ namespace
         ULONGLONG preset_request_tick = 0;
         ULONGLONG last_effects_attempt_tick = 0;
         ULONGLONG last_present_tick = 0;
+        // Techniques visible through the add-on API on the last present.
+        // ReShade enumerates nothing while effects are loading, so 0 means
+        // "loading" or "no effects".
+        size_t technique_count = 0;
+        ULONGLONG empty_since_tick = 0;
     };
 
     HMODULE g_module = nullptr;
@@ -54,6 +78,7 @@ namespace
     unregister_addon_fn g_unregister_addon = nullptr;
     register_event_fn g_register_event = nullptr;
     unregister_event_fn g_unregister_event = nullptr;
+    log_message_fn g_log_message = nullptr;
 
     std::mutex g_mutex;
     std::vector<RuntimeState> g_runtimes;
@@ -77,6 +102,49 @@ namespace
     {
         return state.last_present_tick != 0
             && now - state.last_present_tick <= 2000;
+    }
+
+    // Writes to ReShade.log (next to the game executable). Never call this
+    // while g_mutex is held.
+    void log_message(int level, const std::string &message)
+    {
+        if (g_log_message != nullptr && !message.empty())
+            g_log_message(g_module, level, message.c_str());
+    }
+
+    bool is_runtime_empty_for_long_unlocked(const RuntimeState &state, ULONGLONG now)
+    {
+        return state.technique_count == 0
+            && state.empty_since_tick != 0
+            && now - state.empty_since_tick >= kEmptyRuntimeGiveUpMs;
+    }
+
+    // True while another active runtime is loading effects or applying an
+    // earlier preset switch. Its loader threads may be reading the preset INI
+    // that a switch on this runtime would write.
+    bool is_other_runtime_busy_unlocked(const RuntimeState *self, ULONGLONG now)
+    {
+        for (const RuntimeState &other : g_runtimes)
+        {
+            if (&other == self || !is_runtime_active_unlocked(other, now))
+                continue;
+            if (other.preset_in_flight_generation != 0)
+                return true;
+            if (other.technique_count == 0 && !is_runtime_empty_for_long_unlocked(other, now))
+                return true;
+        }
+        return false;
+    }
+
+    size_t count_loaded_techniques(effect_runtime *runtime)
+    {
+        // effect_runtime::enumerate_techniques() returns nothing while the
+        // runtime is loading effects.
+        size_t count = 0;
+        runtime->enumerate_techniques(
+            nullptr,
+            [&count](effect_runtime *, reshade::api::effect_technique) { ++count; });
+        return count;
     }
 
     bool has_active_runtime_unlocked(ULONGLONG now)
@@ -241,6 +309,9 @@ namespace
         const ULONGLONG now = GetTickCount64();
         const bool actual_effects_enabled = runtime->get_effects_state();
         const std::string actual_preset_path = query_preset_path(runtime);
+        const size_t technique_count = count_loaded_techniques(runtime);
+        std::string log_text;
+        int log_level = 3;
         bool apply_effects = false;
         bool effects_enabled = false;
         uint64_t effects_generation = 0;
@@ -277,33 +348,50 @@ namespace
                 state->applied_effects_generation = g_effects_generation;
             }
 
+            state->technique_count = technique_count;
+            if (technique_count > 0)
+                state->empty_since_tick = 0;
+            else if (state->empty_since_tick == 0)
+                state->empty_since_tick = now;
+
+            // Release a switch whose effects never finished loading, so a newer
+            // request is not blocked forever. Its path is kept if ReShade took it.
+            if (state->preset_in_flight_generation != 0
+                && now - state->preset_request_tick >= kPresetLoadTimeoutMs)
+            {
+                if (state->preset_in_flight_generation == g_preset_generation
+                    && !g_desired_preset_path.empty()
+                    && _stricmp(state->preset_path.c_str(), g_desired_preset_path.c_str()) == 0)
+                {
+                    state->applied_preset_generation = g_preset_generation;
+                }
+                state->preset_in_flight_generation = 0;
+                state->preset_request_present_serial = 0;
+                state->preset_reload_in_progress = false;
+                state->preset_request_tick = 0;
+                log_text = "KKVR bridge: preset switch did not finish loading in time; released it.";
+                log_level = 2;
+            }
+
             if (g_preset_generation != 0
                 && state->applied_preset_generation < g_preset_generation)
             {
                 const bool path_confirmed = !g_desired_preset_path.empty()
                     && _stricmp(state->preset_path.c_str(), g_desired_preset_path.c_str()) == 0;
-                if (state->preset_in_flight_generation == 0 && path_confirmed)
+                const bool loaded = technique_count > 0;
+                if (state->preset_in_flight_generation == 0 && path_confirmed && loaded)
                 {
                     state->applied_preset_generation = g_preset_generation;
                 }
                 else if (state->preset_in_flight_generation == g_preset_generation
-                    && !state->preset_reload_in_progress
                     && state->present_serial > state->preset_request_present_serial
-                    && path_confirmed)
+                    && path_confirmed
+                    && loaded)
                 {
                     // The programmatic setter does not emit event 84 when no
                     // shader reload is needed. Confirm it by reading the path
-                    // back on the following rendered frame instead.
+                    // back once the runtime reports loaded techniques again.
                     state->applied_preset_generation = g_preset_generation;
-                    state->preset_in_flight_generation = 0;
-                    state->preset_request_present_serial = 0;
-                    state->preset_request_tick = 0;
-                }
-
-                const bool request_timed_out = state->preset_in_flight_generation == g_preset_generation
-                    && now - state->preset_request_tick >= 15000;
-                if (request_timed_out)
-                {
                     state->preset_in_flight_generation = 0;
                     state->preset_request_present_serial = 0;
                     state->preset_reload_in_progress = false;
@@ -313,17 +401,47 @@ namespace
                 if (state->applied_preset_generation < g_preset_generation
                     && state->preset_in_flight_generation != g_preset_generation)
                 {
-                    apply_preset = !g_desired_preset_path.empty();
-                    preset_path = g_desired_preset_path;
-                    if (apply_preset)
+                    if (!loaded)
                     {
-                        // Mark the request in flight before calling ReShade.
-                        // Reload event 78 can be raised synchronously by the
-                        // setter and therefore must be able to see this state.
-                        state->preset_in_flight_generation = g_preset_generation;
-                        state->preset_request_present_serial = state->present_serial;
-                        state->preset_reload_in_progress = false;
-                        state->preset_request_tick = now;
+                        // Still loading (startup, an earlier switch, or a manual
+                        // reload). Switching now would save an empty or partial
+                        // technique list into the current preset and, because
+                        // ReShade skips its reload check while loading, leave the
+                        // new preset half applied. Wait for the load to finish.
+                        if (state->preset_in_flight_generation == 0
+                            && is_runtime_empty_for_long_unlocked(*state, now))
+                        {
+                            // Nothing is loaded at all; skip rather than overwrite.
+                            state->applied_preset_generation = g_preset_generation;
+                            log_text = "KKVR bridge: runtime has no loaded techniques; preset switch skipped for it.";
+                            log_level = 2;
+                        }
+                    }
+                    else if (is_other_runtime_busy_unlocked(state, now))
+                    {
+                        // The desktop and VR runtimes share ReShade's preset INI
+                        // cache. Switch them one at a time.
+                    }
+                    else
+                    {
+                        apply_preset = !g_desired_preset_path.empty();
+                        preset_path = g_desired_preset_path;
+                        if (apply_preset)
+                        {
+                            // Mark the request in flight before calling ReShade.
+                            // Reload event 78 can be raised synchronously by the
+                            // setter and therefore must be able to see this state.
+                            state->preset_in_flight_generation = g_preset_generation;
+                            state->preset_request_present_serial = state->present_serial;
+                            state->preset_reload_in_progress = false;
+                            state->preset_request_tick = now;
+                            log_text = std::string("KKVR bridge: switching ")
+                                + (state->is_vr ? "VR" : "desktop")
+                                + " runtime from \"" + state->preset_path
+                                + "\" to \"" + preset_path + "\" ("
+                                + std::to_string(technique_count) + " techniques loaded).";
+                            log_level = 3;
+                        }
                     }
                 }
                 preset_generation = g_preset_generation;
@@ -348,6 +466,8 @@ namespace
                 effects_generation = g_effects_generation;
             }
         }
+
+        log_message(log_level, log_text);
 
         // ReShade's runtime object is only touched from its own present callback.
         if (apply_preset)
@@ -391,6 +511,9 @@ namespace
             GetProcAddress(g_reshade_module, "ReShadeRegisterEvent"));
         g_unregister_event = reinterpret_cast<unregister_event_fn>(
             GetProcAddress(g_reshade_module, "ReShadeUnregisterEvent"));
+        // Optional: only used for diagnostics in ReShade.log.
+        g_log_message = reinterpret_cast<log_message_fn>(
+            GetProcAddress(g_reshade_module, "ReShadeLogMessage"));
 
         if (g_register_addon == nullptr
             || g_unregister_addon == nullptr
