@@ -1108,7 +1108,13 @@ internal class GripMoveKKCharaStudioTool : Tool
 
 		// Hiding IK controls must not disable the main VR UI or world locomotion.
 		// B/Y long-press does not need a tracked pose.
-		HandleButtonEvents();
+		// While MMD presentation hides hands and UI, B/Y GUI recall, the
+		// rotation-lock chord, and trigger select stay off (KK returned from
+		// the whole update here). Locomotion above stays free without a camera VMD.
+		if (VRMmdPresentationPolicy.BlocksUiButtons(VRMmdPlaybackController.IsPresentationHidingUi, IsMmdRigLocked))
+			CancelButtonEventsForMmdPresentation();
+		else
+			HandleButtonEvents();
 		if (LocomotionInputGate.Note(_isLeftHand ? GateTrackingL : GateTrackingR, !poseReady))
 		{
 			// Pose loss skips the grab update below. Still honor a grip release
@@ -1366,6 +1372,17 @@ internal class GripMoveKKCharaStudioTool : Tool
 		}
 		nearestGrabable = float.MaxValue;
 		ClearWorldMoveResidual();
+	}
+
+	// A B/Y press that starts while UI is hidden must not become a GUI reset
+	// once presentation ends; its rising edge is consumed here.
+	private void CancelButtonEventsForMmdPresentation()
+	{
+		_menuTracking = false;
+		_menuChorded = true;
+		_menuLongFired = false;
+		_rotLockActive = false;
+		_rotLockFired = false;
 	}
 
 	private void HandleButtonEvents()

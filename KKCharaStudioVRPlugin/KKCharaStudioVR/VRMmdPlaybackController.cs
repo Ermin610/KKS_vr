@@ -31,6 +31,12 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
         || (Instance != null
             && Instance._stateReadable
             && (Instance._presentationActive || Instance._awaitRightStickRelease));
+    /// <summary>
+    /// Hands and UI are hidden for MMD playback. Buttons must not bring UI
+    /// back while this is true (B/Y GUI recall, UI laser, trigger select).
+    /// </summary>
+    internal static bool IsPresentationHidingUi =>
+        Instance != null && Instance._presentationActive;
     public static bool ConsumedPlaybackClickThisFrame =>
         Instance != null && Instance._playbackClickConsumedFrame == Time.frameCount;
     internal static bool SuppressStickLocomotion =>
@@ -104,6 +110,14 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
     private readonly HashSet<int> _opacityParts = new HashSet<int>();
     private readonly List<int> _heelScratch = new List<int>();
     private bool _mmdCameraLockHeld;
+    private VRMmdPresentationPolicy.Block _lastPresentationBlock = VRMmdPresentationPolicy.Block.SettingOff;
+    private bool _lastReporterInstallSucceeded;
+    private int _silentListenerCount;
+    private int _presentationLogCount;
+    private const int MaxPresentationLogLines = 60;
+    private bool _lastCameraOwnerLogged;
+    private bool _cameraOwnerLogInitialized;
+    private int _cameraOwnerLogCount;
 
     public string CurrentVmdPath => _currentVmdPath;
     public VRMmdCueSheet EffectiveCueSheet => _effectiveCueSheet;
@@ -176,13 +190,19 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
         if (!isPlaying)
             _keepUiAfterSummon = false;
 
-        bool shouldPresent = _stateReadable
-            && isPlaying
-            && _settings != null
-            && _settings.HideHandsAndUiDuringMmd
-            && !_keepUiAfterSummon;
+        VRMmdPresentationPolicy.Block block = VRMmdPresentationPolicy.Decide(
+            _settings != null && _settings.HideHandsAndUiDuringMmd,
+            _stateReadable,
+            VRMmddStateBridge.PlaybackReported,
+            IsFreshPlaybackReport(),
+            VRMmddStateBridge.PlaybackAvailable,
+            VRMmddStateBridge.PlaybackIsPlaying,
+            _keepUiAfterSummon);
+        LogPresentationBlock(block);
+        bool shouldPresent = block == VRMmdPresentationPolicy.Block.None;
         SetPresentationActive(shouldPresent);
         UpdateMmdCameraLock(playbackAvailable, isPlaying);
+        LogCameraOwnerWhilePlaying(isPlaying);
         if (_presentationActive || isPlaying)
         {
             _pausedStickEdgeReady = false;
@@ -469,6 +489,17 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
             return;
         bool stale = !VRMmddStateBridge.PlaybackReported
             || Time.realtimeSinceStartup - VRMmddStateBridge.PlaybackReportRealtime > ReporterStaleSeconds;
+        _silentListenerCount = VRMmdPresentationPolicy.NextSilentListenerCount(
+            _silentListenerCount,
+            stale,
+            // Without a director the install only writes one "unavailable"
+            // report and may not register a listener; that is not silence.
+            _lastReporterInstallSucceeded && VRMmddStateBridge.PlaybackAvailable);
+        if (VRMmdPresentationPolicy.ShouldWarnSilentListener(_silentListenerCount))
+        {
+            VRLog.Warn("MMDD playback reporter installs, but its VNGE 'update' listener does not report. "
+                + "Playback state goes stale after 1s, so MMD presentation and the camera lock cannot stay on.");
+        }
         if (stale)
             TryInstallReporter();
         bool fresh = VRMmddStateBridge.PlaybackReported
@@ -521,7 +552,57 @@ internal sealed class VRMmdPlaybackController : MonoBehaviour
     {
         _nextReporterRetry = Time.unscaledTime + ReporterRetrySeconds;
         string ignored;
-        VRMmddService.EnsurePlaybackStateReporter(out ignored);
+        _lastReporterInstallSucceeded = VRMmddService.EnsurePlaybackStateReporter(out ignored);
+    }
+
+    // Presentation decisions were silent, so "hide hands has no effect" left
+    // nothing in the log. One line per reason change says which input failed.
+    private void LogPresentationBlock(VRMmdPresentationPolicy.Block block)
+    {
+        VRMmdPresentationPolicy.Block previous = _lastPresentationBlock;
+        _lastPresentationBlock = block;
+        if (!VRMmdPresentationPolicy.ShouldLogTransition(
+                previous, block, VRMmddStateBridge.PlaybackIsPlaying))
+            return;
+        if (_presentationLogCount >= MaxPresentationLogLines)
+            return;
+        _presentationLogCount++;
+        VRLog.Info("MMD presentation " + (block == VRMmdPresentationPolicy.Block.None ? "on" : "off")
+            + ": " + VRMmdPresentationPolicy.Describe(block)
+            + " (reported=" + VRMmddStateBridge.PlaybackReported
+            + ", available=" + VRMmddStateBridge.PlaybackAvailable
+            + ", playing=" + VRMmddStateBridge.PlaybackIsPlaying
+            + ", reportAge=" + (Time.realtimeSinceStartup - VRMmddStateBridge.PlaybackReportRealtime).ToString("0.00")
+            + "s, cameraOwner=" + VRMmddStateBridge.DirectVrCameraOwner + ")");
+    }
+
+    private void LogCameraOwnerWhilePlaying(bool isPlaying)
+    {
+        if (!isPlaying)
+        {
+            // Log again for the next clip or play session.
+            _cameraOwnerLogInitialized = false;
+            return;
+        }
+        bool owner = VRMmddStateBridge.DirectVrCameraOwner;
+        if (_cameraOwnerLogInitialized && owner == _lastCameraOwnerLogged)
+            return;
+        if (_cameraOwnerLogCount >= MaxPresentationLogLines)
+            return;
+        _cameraOwnerLogCount++;
+        _cameraOwnerLogInitialized = true;
+        _lastCameraOwnerLogged = owner;
+        if (!owner)
+        {
+            // Once per owner change, so playback started from MMDD's own UI
+            // also records why the camera VMD is not driving the headset.
+            string ignored;
+            VRMmddService.RefreshCameraDiagnostics(out ignored);
+        }
+        VRLog.Info(owner
+            ? "MMD camera VMD owns the VR rig; immersive camera follow is active."
+            : "MMD is playing without a camera that owns the VR rig; free locomotion stays on. "
+                + VRMmddStateBridge.DescribeCameraDiagnostics());
     }
 
     private void UpdateMmdCameraLock(bool playbackAvailable, bool isPlaying)

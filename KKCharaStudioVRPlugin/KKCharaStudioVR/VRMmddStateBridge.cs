@@ -52,6 +52,44 @@ public static class VRMmddStateBridge
     public static bool MmdClearRollbackFailed { get; private set; }
     public static string MmdClearError { get; private set; }
 
+    public static bool CameraDiagnosticsReported { get; private set; }
+    public static bool CameraDiagnosticsObjectCameraActive { get; private set; }
+    public static int CameraDiagnosticsControllerCount { get; private set; }
+    public static int CameraDiagnosticsEnabledCount { get; private set; }
+    public static int CameraDiagnosticsBoundCount { get; private set; }
+    public static int CameraDiagnosticsVrOriginCount { get; private set; }
+
+    /// <summary>
+    /// Why DirectVrCameraOwner is false: a Studio camera object is active, no
+    /// camera VMD is loaded, or MMDD's camera controllers carry no VR origin.
+    /// Reported only on explicit transport calls, not per frame.
+    /// </summary>
+    public static void ReportCameraDiagnostics(
+        bool objectCameraActive,
+        int controllerCount,
+        int enabledCount,
+        int boundCount,
+        int vrOriginCount)
+    {
+        CameraDiagnosticsReported = true;
+        CameraDiagnosticsObjectCameraActive = objectCameraActive;
+        CameraDiagnosticsControllerCount = controllerCount;
+        CameraDiagnosticsEnabledCount = enabledCount;
+        CameraDiagnosticsBoundCount = boundCount;
+        CameraDiagnosticsVrOriginCount = vrOriginCount;
+    }
+
+    internal static string DescribeCameraDiagnostics()
+    {
+        if (!CameraDiagnosticsReported)
+            return "Camera diagnostics not reported yet.";
+        return "Camera diagnostics: studioCameraObjectActive=" + CameraDiagnosticsObjectCameraActive
+            + ", cameraControllers=" + CameraDiagnosticsControllerCount
+            + ", enabled=" + CameraDiagnosticsEnabledCount
+            + ", boundToCameraObject=" + CameraDiagnosticsBoundCount
+            + ", withVrOrigin=" + CameraDiagnosticsVrOriginCount;
+    }
+
     public static void ReportFixedFov(bool enabled, float value, int controllerCount)
     {
         FixedFovReported = true;
